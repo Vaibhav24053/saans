@@ -161,8 +161,9 @@ export interface CommuteImpactCalculation {
   weeklySavedKg: number;
   monthlySavedKg: number;
   yearlySavedKg: number;
-  percentChange: number;
+  percentChange: number | null;
   changeDirection: 'lower' | 'same' | 'higher';
+  comparisonLabel: string;
 }
 
 function round2(n: number): number {
@@ -171,6 +172,43 @@ function round2(n: number): number {
 
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
+}
+
+function getBaselineDisplayName(mode: TransportEmissionFactor): string {
+  if (mode.id === 'wfh') return 'Work From Home';
+  return mode.label.replace(/\s*\([^)]*\)\s*/g, '').trim();
+}
+
+export function formatCommuteComparisonLabel(params: {
+  baselineMode: TransportEmissionFactor;
+  baselineWeeklyKg: number;
+  weeklySavedKg: number;
+  percentChange: number | null;
+  changeDirection: 'lower' | 'same' | 'higher';
+}): string {
+  const {
+    baselineMode,
+    baselineWeeklyKg,
+    weeklySavedKg,
+    percentChange,
+    changeDirection,
+  } = params;
+
+  if (baselineWeeklyKg <= 0 || percentChange === null) {
+    const baselineName = getBaselineDisplayName(baselineMode);
+    if (changeDirection === 'higher') {
+      return `+${Math.abs(weeklySavedKg)} kg CO₂e/week vs ${baselineName} baseline`;
+    }
+    return `No change vs ${baselineName} baseline`;
+  }
+
+  if (changeDirection === 'lower') {
+    return `${percentChange}% lower`;
+  }
+  if (changeDirection === 'higher') {
+    return `${percentChange}% higher`;
+  }
+  return 'No change';
 }
 
 export function calculateCommuteImpact(
@@ -202,10 +240,18 @@ export function calculateCommuteImpact(
   if (weeklySavedKg > 0.005) changeDirection = 'lower';
   else if (weeklySavedKg < -0.005) changeDirection = 'higher';
 
-  const percentChange =
+  const percentChange: number | null =
     baselineWeeklyRaw > 0
       ? Math.round((Math.abs(baselineWeeklyRaw - alternativeWeeklyRaw) / baselineWeeklyRaw) * 100)
-      : 0;
+      : null;
+
+  const comparisonLabel = formatCommuteComparisonLabel({
+    baselineMode,
+    baselineWeeklyKg,
+    weeklySavedKg,
+    percentChange,
+    changeDirection,
+  });
 
   return {
     baselineMode,
@@ -220,5 +266,6 @@ export function calculateCommuteImpact(
     yearlySavedKg,
     percentChange,
     changeDirection,
+    comparisonLabel,
   };
 }

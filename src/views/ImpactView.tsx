@@ -337,12 +337,8 @@ export function ImpactView() {
                     ? '0 kg'
                     : `${calc.changeDirection === 'lower' ? '−' : '+'}${Math.abs(calc.weeklySavedKg)} kg`}
                 </div>
-                <div className="text-[10px] text-[#2D6A4F] mt-0.5">
-                  {calc.changeDirection === 'lower'
-                    ? `${calc.percentChange}% lower`
-                    : calc.changeDirection === 'higher'
-                      ? `${calc.percentChange}% higher`
-                      : 'No change'}
+                <div className="text-[10px] text-[#2D6A4F] mt-0.5 leading-snug">
+                  {calc.comparisonLabel}
                 </div>
               </div>
               <div className="p-3.5 rounded-xl bg-[#FAF9F6] border border-[#E6E3DA]">

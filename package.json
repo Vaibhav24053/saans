@@ -1,0 +1,38 @@
+{
+  "name": "saans-air-companion",
+  "private": true,
+  "version": "1.0.0",
+  "description": "SAANS — Know the air. Change your day. GenAI-powered personal and family urban air quality companion.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.server.json",
+    "start": "node dist-server/server/index.js",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "recharts": "^2.15.3",
+    "zod": "^3.25.30"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@types/express": "^5.0.2",
+    "@types/node": "^22.15.21",
+    "@types/react": "^19.1.5",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.0",
+    "eslint": "^9.27.0",
+    "tailwindcss": "^4.1.7",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

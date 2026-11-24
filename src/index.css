@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: #F7F6F2;
+    --bg-surface: #FFFFFF;
+    --bg-subtle: #F0EEE7;
+    --border-hairline: #E6E3DA;
+    --border-strong: #D4D0C4;
+    --ink-primary: #151B18;
+    --ink-secondary: #4A5550;
+    --ink-muted: #717D77;
+    --brand-forest: #1B4332;
+    --brand-pine: #2D6A4F;
+    --brand-sage: #E6F0EB;
+    --accent-sky: #2B6CB0;
+    --accent-sky-soft: #E8F2F8;
+  }
+
+  html {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background-color: var(--bg-canvas);
+    color: var(--ink-primary);
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--bg-canvas);
+    color: var(--ink-primary);
+  }
+}
+
+.font-serif-editorial {
+  font-family: 'Instrument Serif', Georgia, Cambria, 'Times New Roman', serif;
+  letter-spacing: -0.01em;
+}
+
+.font-mono-tabular {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.saans-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E6E3DA;
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(21, 27, 24, 0.03), 0 4px 16px rgba(21, 27, 24, 0.025);
+}
+
+.saans-card-subtle {
+  background-color: #F2F0E9;
+  border: 1px solid #E6E3DA;
+  border-radius: 14px;
+}
+
+/* Subtle focus ring for keyboard accessibility */
+*:focus-visible {
+  outline: 2px solid #2D6A4F;
+  outline-offset: 2px;
+}
+
+/* Custom sleek scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #D4D0C4;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #B4AFA1;
+}

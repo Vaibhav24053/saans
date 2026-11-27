@@ -19,6 +19,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  findCurrentHourIndex,
   formatHourLabel,
   formatTimeRange,
   getAqiCategory,
@@ -47,9 +48,7 @@ export function AirIntelligenceView() {
     );
   }
 
-  const nowPrefix = airData.currentTimeLocal.slice(0, 13);
-  let startIdx = airData.hourly.findIndex((h) => h.time.startsWith(nowPrefix));
-  if (startIdx < 0) startIdx = 0;
+  const startIdx = findCurrentHourIndex(airData.hourly, airData.currentTimeLocal);
 
   const sliced = airData.hourly.slice(startIdx, startIdx + horizonHours);
   const chartData = sliced.map((pt, i) => ({
@@ -81,11 +80,11 @@ export function AirIntelligenceView() {
     value: number | null;
     whoRef: number;
   }> = [
-    { key: 'pm25', value: airData.current.pm25, whoRef: 15 },
-    { key: 'pm10', value: airData.current.pm10, whoRef: 45 },
-    { key: 'no2', value: airData.current.no2, whoRef: 25 },
-    { key: 'so2', value: airData.current.so2, whoRef: 40 },
-    { key: 'o3', value: airData.current.o3, whoRef: 100 },
+    { key: 'pm25', value: airData.current.pm25, whoRef: POLLUTANT_META.pm25.whoGuidelineValue },
+    { key: 'pm10', value: airData.current.pm10, whoRef: POLLUTANT_META.pm10.whoGuidelineValue },
+    { key: 'no2', value: airData.current.no2, whoRef: POLLUTANT_META.no2.whoGuidelineValue },
+    { key: 'so2', value: airData.current.so2, whoRef: POLLUTANT_META.so2.whoGuidelineValue },
+    { key: 'o3', value: airData.current.o3, whoRef: POLLUTANT_META.o3.whoGuidelineValue },
   ];
 
   const TrendIcon =

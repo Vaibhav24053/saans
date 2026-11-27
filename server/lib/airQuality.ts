@@ -15,12 +15,57 @@ const geoCache = new Map<string, CacheEntry<LocationInfo[]>>();
 
 const AIR_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const GEO_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_CACHE_ENTRIES = 200;
+
+export function clearAirQualityCaches(): void {
+  airCache.clear();
+  geoCache.clear();
+}
+
+function setBoundedCache<T>(
+  cache: Map<string, CacheEntry<T>>,
+  key: string,
+  entry: CacheEntry<T>,
+): void {
+  if (cache.size >= MAX_CACHE_ENTRIES && !cache.has(key)) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
+  cache.set(key, entry);
+}
+
+export function isValidCoordinates(latitude: number, longitude: number): boolean {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+}
+
+export function assertValidCoordinates(latitude: number, longitude: number): void {
+  if (!isValidCoordinates(latitude, longitude)) {
+    throw new RangeError(
+      'Invalid coordinates: latitude must be between -90 and 90, and longitude must be between -180 and 180.',
+    );
+  }
+}
 
 function safeNumber(val: unknown): number | null {
-  if (typeof val === 'number' && Number.isFinite(val)) {
+  if (typeof val === 'number' && Number.isFinite(val) && val >= 0) {
     return Math.round(val * 10) / 10;
   }
   return null;
+}
+
+function formatCoordinateFallbackLabel(latitude: number, longitude: number): string {
+  const latDir = latitude >= 0 ? 'N' : 'S';
+  const lonDir = longitude >= 0 ? 'E' : 'W';
+  return `${Math.abs(latitude).toFixed(2)}°${latDir}, ${Math.abs(longitude).toFixed(2)}°${lonDir}`;
 }
 
 export async function searchLocations(query: string): Promise<LocationInfo[]> {
@@ -69,7 +114,10 @@ export async function searchLocations(query: string): Promise<LocationInfo[]> {
     source: 'geocoding',
   }));
 
-  geoCache.set(cacheKey, { value: results, expiresAt: Date.now() + GEO_TTL_MS });
+  setBoundedCache(geoCache, cacheKey, {
+    value: results,
+    expiresAt: Date.now() + GEO_TTL_MS,
+  });
   return results;
 }
 
@@ -77,6 +125,7 @@ export async function reverseGeocodeCoordinates(
   latitude: number,
   longitude: number,
 ): Promise<LocationInfo> {
+  assertValidCoordinates(latitude, longitude);
   try {
     const url = new URL('https://nominatim.openstreetmap.org/reverse');
     url.searchParams.set('lat', String(latitude));
@@ -123,7 +172,7 @@ export async function reverseGeocodeCoordinates(
   }
 
   return {
-    name: `${latitude.toFixed(2)}°N, ${longitude.toFixed(2)}°E`,
+    name: formatCoordinateFallbackLabel(latitude, longitude),
     country: 'Detected Coordinates',
     latitude,
     longitude,
@@ -132,10 +181,18 @@ export async function reverseGeocodeCoordinates(
   };
 }
 
-function isInEuropeanCamsDomain(latitude: number, longitude: number): boolean {
+export function isInEuropeanCamsDomain(latitude: number, longitude: number): boolean {
   // Copernicus CAMS European regional domain spans roughly 30°N–72°N, 25°W–45°E.
   // India (approx. 6°N–37°N, 68°E–98°E) and global cities outside Europe use CAMS Global (~45 km).
   return latitude >= 30 && latitude <= 72 && longitude >= -25 && longitude <= 45;
+}
+
+export function selectCamsModelDomain(
+  latitude: number,
+  longitude: number,
+): 'cams_europe' | 'cams_global' {
+  assertValidCoordinates(latitude, longitude);
+  return isInEuropeanCamsDomain(latitude, longitude) ? 'cams_europe' : 'cams_global';
 }
 
 export async function fetchOpenMeteoAirQuality(
@@ -143,12 +200,10 @@ export async function fetchOpenMeteoAirQuality(
   longitude: number,
   locationHint?: Partial<LocationInfo>,
 ): Promise<AirQualityData> {
+  assertValidCoordinates(latitude, longitude);
   const roundedLat = Math.round(latitude * 100) / 100;
   const roundedLon = Math.round(longitude * 100) / 100;
-  const inEurope = isInEuropeanCamsDomain(latitude, longitude);
-  const modelDomain: 'cams_europe' | 'cams_global' = inEurope
-    ? 'cams_europe'
-    : 'cams_global';
+  const modelDomain = selectCamsModelDomain(latitude, longitude);
   const cacheKey = `${roundedLat},${roundedLon},${modelDomain}`;
 
   const cached = airCache.get(cacheKey);
@@ -244,14 +299,18 @@ export async function fetchOpenMeteoAirQuality(
     o3: safeNumber(raw.current?.ozone),
   };
 
-  const timezone = raw.timezone ?? locationHint?.timezone ?? 'UTC';
+  const hintTimezone =
+    locationHint?.timezone && locationHint.timezone.trim() !== 'auto'
+      ? locationHint.timezone.trim()
+      : '';
+  const timezone = raw.timezone?.trim() || hintTimezone || 'UTC';
   const currentTimeLocal =
     raw.current?.time ?? hourly[0]?.time ?? new Date().toISOString().slice(0, 16);
 
   const summary = computeAirQualitySummary(current, hourly, currentTimeLocal);
 
   const location: LocationInfo = {
-    name: locationHint?.name ?? `${roundedLat}°, ${roundedLon}°`,
+    name: locationHint?.name ?? formatCoordinateFallbackLabel(latitude, longitude),
     admin1: locationHint?.admin1,
     country: locationHint?.country ?? '',
     latitude,
@@ -298,6 +357,9 @@ export async function fetchOpenMeteoAirQuality(
     summary,
   };
 
-  airCache.set(cacheKey, { value: result, expiresAt: Date.now() + AIR_TTL_MS });
+  setBoundedCache(airCache, cacheKey, {
+    value: result,
+    expiresAt: Date.now() + AIR_TTL_MS,
+  });
   return result;
 }

@@ -159,12 +159,43 @@ function loadStoredDemo(): DemoState {
   }
 }
 
+function buildPlanFingerprint(
+  profile: HouseholdProfile,
+  airData: AirQualityData | null,
+): string {
+  if (!airData) return '';
+  return JSON.stringify({
+    loc: `${airData.location.name}:${airData.location.latitude.toFixed(2)}`,
+    demo: airData.demoScenarioId ?? 'live',
+    aqi: airData.current.usAqi,
+    pm25: airData.current.pm25,
+    trend: airData.summary.trendDirection,
+    adults: profile.adults,
+    children: profile.children,
+    olderAdults: profile.olderAdults,
+    sens: profile.respiratorySensitivity,
+    commute: profile.commuteType,
+    dist: profile.commuteDistanceKm,
+    win: profile.outdoorWindow,
+    home: profile.homeType,
+    purifier: profile.hasAirPurifier,
+    vent: profile.ventilationOption,
+    fuel: profile.cookingFuel,
+    sustain: profile.sustainabilityFocus,
+    budget: profile.budgetPreference,
+  });
+}
+
 export function SaansProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<HouseholdProfile>(loadStoredProfile);
   const [demoState, setDemoState] = useState<DemoState>(loadStoredDemo);
   const [aqiScale, setAqiScaleState] = useState<AqiScale>(() => {
-    const saved = localStorage.getItem(STORAGE_SCALE_KEY);
-    return saved === 'european_aqi' ? 'european_aqi' : 'us_aqi';
+    try {
+      const saved = localStorage.getItem(STORAGE_SCALE_KEY);
+      return saved === 'european_aqi' ? 'european_aqi' : 'us_aqi';
+    } catch {
+      return 'us_aqi';
+    }
   });
 
   const [airData, setAirData] = useState<AirQualityData | null>(null);
@@ -187,6 +218,8 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
   const [isDemoTourOpen, setIsDemoTourOpen] = useState<boolean>(false);
 
   const lastPlanFingerprintRef = useRef<string>('');
+  const airRequestIdRef = useRef<number>(0);
+  const planRequestIdRef = useRef<number>(0);
 
   // Persist profile, demo state, and scale
   useEffect(() => {
@@ -237,6 +270,7 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
 
   // Load air quality data whenever location or demo mode changes
   const refreshAirData = useCallback(async () => {
+    const requestId = ++airRequestIdRef.current;
     setAirError(null);
     setUsingCachedOfflineData(false);
 
@@ -251,6 +285,7 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
     setAirLoading(true);
     try {
       const live = await fetchLiveAirQuality(profile.location);
+      if (requestId !== airRequestIdRef.current) return;
       setAirData(live);
       try {
         localStorage.setItem(STORAGE_AIR_CACHE_KEY, JSON.stringify(live));
@@ -258,6 +293,7 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
         // Ignore
       }
     } catch (err) {
+      if (requestId !== airRequestIdRef.current) return;
       const message =
         err instanceof Error
           ? err.message
@@ -276,69 +312,61 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
         // Leave airData null so explicit error state shows
       }
     } finally {
-      setAirLoading(false);
+      if (requestId === airRequestIdRef.current) {
+        setAirLoading(false);
+      }
     }
   }, [demoState.enabled, demoState.scenarioId, profile.location]);
 
   useEffect(() => {
-    if (profile.onboardingCompleted) {
+    if (!profile.onboardingCompleted) return;
+    const timer = setTimeout(() => {
       void refreshAirData();
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [profile.onboardingCompleted, refreshAirData]);
 
   // Fingerprint so plan automatically regenerates when meaningful inputs change
-  const planFingerprint = useMemo(() => {
-    if (!airData) return '';
-    return JSON.stringify({
-      loc: `${airData.location.name}:${airData.location.latitude.toFixed(2)}`,
-      demo: airData.demoScenarioId ?? 'live',
-      aqi: airData.current.usAqi,
-      pm25: airData.current.pm25,
-      trend: airData.summary.trendDirection,
-      adults: profile.adults,
-      children: profile.children,
-      olderAdults: profile.olderAdults,
-      sens: profile.respiratorySensitivity,
-      commute: profile.commuteType,
-      dist: profile.commuteDistanceKm,
-      win: profile.outdoorWindow,
-      home: profile.homeType,
-      purifier: profile.hasAirPurifier,
-      vent: profile.ventilationOption,
-      fuel: profile.cookingFuel,
-      sustain: profile.sustainabilityFocus,
-      budget: profile.budgetPreference,
-    });
-  }, [airData, profile]);
+  const planFingerprint = useMemo(
+    () => buildPlanFingerprint(profile, airData),
+    [airData, profile],
+  );
 
   const runPlanGeneration = useCallback(
     async (force = false) => {
       if (!airData || !profile.onboardingCompleted) return;
       if (!force && planFingerprint === lastPlanFingerprintRef.current) return;
 
+      const requestId = ++planRequestIdRef.current;
       lastPlanFingerprintRef.current = planFingerprint;
       setPlanLoading(true);
       setPlanError(null);
       try {
         const generated = await requestDailyPlan(profile, airData);
+        if (requestId !== planRequestIdRef.current) return;
         setPlan(generated);
       } catch (err) {
+        if (requestId !== planRequestIdRef.current) return;
         setPlanError(
           err instanceof Error
             ? err.message
             : 'Unable to generate your personalised daily plan right now.',
         );
       } finally {
-        setPlanLoading(false);
+        if (requestId === planRequestIdRef.current) {
+          setPlanLoading(false);
+        }
       }
     },
     [airData, profile, planFingerprint],
   );
 
   useEffect(() => {
-    if (airData && profile.onboardingCompleted) {
+    if (!airData || !profile.onboardingCompleted) return;
+    const timer = setTimeout(() => {
       void runPlanGeneration(false);
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [airData, profile.onboardingCompleted, runPlanGeneration]);
 
   const regeneratePlan = useCallback(async () => {
@@ -448,43 +476,78 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
 
   const clearChat = useCallback(() => setChatMessages([]), []);
 
-  const value: SaansContextValue = {
-    profile,
-    updateProfile,
-    setLocation,
-    completeOnboarding,
-    demoMode: demoState.enabled,
-    demoScenarioId: demoState.scenarioId,
-    activePersonaId: demoState.personaId,
-    toggleDemoMode,
-    selectDemoScenario,
-    applyDemoPersona,
-    aqiScale,
-    setAqiScale,
-    airData,
-    airLoading,
-    airError,
-    isOffline,
-    usingCachedOfflineData,
-    refreshAirData,
-    plan,
-    planLoading,
-    planError,
-    regeneratePlan,
-    chatMessages,
-    chatLoading,
-    sendChatMessage,
-    clearChat,
-    healthStatus,
-    activeView,
-    setActiveView,
-    isProfileEditorOpen,
-    setIsProfileEditorOpen,
-    isLocationModalOpen,
-    setIsLocationModalOpen,
-    isDemoTourOpen,
-    setIsDemoTourOpen,
-  };
+  const value: SaansContextValue = useMemo(
+    () => ({
+      profile,
+      updateProfile,
+      setLocation,
+      completeOnboarding,
+      demoMode: demoState.enabled,
+      demoScenarioId: demoState.scenarioId,
+      activePersonaId: demoState.personaId,
+      toggleDemoMode,
+      selectDemoScenario,
+      applyDemoPersona,
+      aqiScale,
+      setAqiScale,
+      airData,
+      airLoading,
+      airError,
+      isOffline,
+      usingCachedOfflineData,
+      refreshAirData,
+      plan,
+      planLoading,
+      planError,
+      regeneratePlan,
+      chatMessages,
+      chatLoading,
+      sendChatMessage,
+      clearChat,
+      healthStatus,
+      activeView,
+      setActiveView,
+      isProfileEditorOpen,
+      setIsProfileEditorOpen,
+      isLocationModalOpen,
+      setIsLocationModalOpen,
+      isDemoTourOpen,
+      setIsDemoTourOpen,
+    }),
+    [
+      profile,
+      updateProfile,
+      setLocation,
+      completeOnboarding,
+      demoState.enabled,
+      demoState.scenarioId,
+      demoState.personaId,
+      toggleDemoMode,
+      selectDemoScenario,
+      applyDemoPersona,
+      aqiScale,
+      setAqiScale,
+      airData,
+      airLoading,
+      airError,
+      isOffline,
+      usingCachedOfflineData,
+      refreshAirData,
+      plan,
+      planLoading,
+      planError,
+      regeneratePlan,
+      chatMessages,
+      chatLoading,
+      sendChatMessage,
+      clearChat,
+      healthStatus,
+      activeView,
+      isProfileEditorOpen,
+      isLocationModalOpen,
+      isDemoTourOpen,
+    ],
+  );
 
   return <SaansContext.Provider value={value}>{children}</SaansContext.Provider>;
 }

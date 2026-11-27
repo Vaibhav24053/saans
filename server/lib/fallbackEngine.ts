@@ -1,6 +1,7 @@
 import {
   formatTimeRange,
   getUsAqiCategory,
+  isValidAqiValue,
   POLLUTANT_META,
 } from '../../shared/aqi.js';
 import type {
@@ -11,6 +12,19 @@ import type {
   HouseholdProfile,
   PlanItem,
 } from '../../shared/types.js';
+
+function sanitizeNumericReading(val: number | null | undefined): number | null {
+  return isValidAqiValue(val) ? val : null;
+}
+
+function getSafeLocationName(air: AirQualityData): string {
+  return air.location?.name?.trim() || 'your area';
+}
+
+function getSafeDominantMeta(air: AirQualityData) {
+  const key = air.summary?.dominantPollutant;
+  return (key && POLLUTANT_META[key]) || POLLUTANT_META.pm25;
+}
 
 function describeHouseholdShort(profile: HouseholdProfile): string {
   const parts: string[] = [];
@@ -43,13 +57,19 @@ export function generateFallbackDailyPlan(
   fallbackReason: string,
   fallbackCode: FallbackCode = 'missing_key',
 ): DailyPlanResponse {
-  const rawAqi = air.current.usAqi;
+  const rawAqi = sanitizeNumericReading(air.current?.usAqi);
   const aqiAvailable = rawAqi !== null;
   const aqi = rawAqi ?? 0;
   const aqiDisplay = aqiAvailable ? `${rawAqi} US AQI` : 'AQI currently unavailable';
-  const pm25 = air.current.pm25;
+  const aqiTrigger = aqiAvailable ? `Current US AQI: ${rawAqi}` : 'Current US AQI: Unavailable';
+  const pm25 = sanitizeNumericReading(air.current?.pm25);
   const cat = getUsAqiCategory(rawAqi);
-  const dominantMeta = POLLUTANT_META[air.summary.dominantPollutant];
+  const locationName = getSafeLocationName(air);
+  const dominantMeta = getSafeDominantMeta(air);
+  const trendDirection = air.summary?.trendDirection ?? 'stable';
+  const trendNote =
+    air.summary?.trendNote?.trim() ||
+    'Modelled levels are expected to remain broadly steady over the next 6 hours.';
   const hasSensitiveGroup =
     profile.children > 0 ||
     profile.olderAdults > 0 ||
@@ -57,13 +77,13 @@ export function generateFallbackDailyPlan(
   const severe = aqiAvailable && aqi >= 200;
   const high = aqiAvailable && aqi >= 151;
   const elevated = aqiAvailable && aqi >= 101;
-  const lowerWinText = air.summary.lowerWindow
+  const lowerWinText = air.summary?.lowerWindow
     ? `${formatTimeRange(
         air.summary.lowerWindow.startTime,
         air.summary.lowerWindow.endTime,
       )} (forecast ~${air.summary.lowerWindow.avgUsAqi} US AQI)`
     : null;
-  const peakWinText = air.summary.peakWindow
+  const peakWinText = air.summary?.peakWindow
     ? `${formatTimeRange(
         air.summary.peakWindow.startTime,
         air.summary.peakWindow.endTime,
@@ -75,9 +95,9 @@ export function generateFallbackDailyPlan(
 
   // Headline
   const headline = !aqiAvailable
-    ? `Live AQI is currently unavailable for ${air.location.name}: follow precautionary indoor habits until readings refresh.`
+    ? `Live AQI is currently unavailable for ${locationName}: follow precautionary indoor habits until readings refresh.`
     : severe
-      ? `Heavy ${dominantMeta.symbol} smog day in ${air.location.name}: protect indoor air and shift ${householdDesc}'s routines indoors.`
+      ? `Heavy ${dominantMeta.symbol} smog day in ${locationName}: protect indoor air and shift ${householdDesc}'s routines indoors.`
       : high
         ? `Unhealthy modelled air (${aqiDisplay}): adjust ${commuteLabel} timing and keep strenuous activity indoors.`
         : elevated
@@ -86,10 +106,10 @@ export function generateFallbackDailyPlan(
 
   // Hero summary
   const currentConditions = !aqiAvailable
-    ? `Live modelled AQI readings for ${air.location.name} are temporarily unavailable, so SAANS is not estimating a numeric index. Until fresh environmental data loads, favour cautious indoor ventilation and lower-emission errands for ${householdDesc}.`
-    : `Modelled air quality in ${air.location.name} is ${cat.label} (${aqiDisplay}${
+    ? `Live modelled AQI readings for ${locationName} are temporarily unavailable, so SAANS is not estimating a numeric index. Until fresh environmental data loads, favour cautious indoor ventilation and lower-emission errands for ${householdDesc}.`
+    : `Modelled air quality in ${locationName} is ${cat.label} (${aqiDisplay}${
         pm25 !== null ? `, PM2.5 at ${pm25} µg/m³` : ''
-      }), driven primarily by ${dominantMeta.symbol}. ${air.summary.trendNote} For ${householdDesc}${
+      }), driven primarily by ${dominantMeta.symbol}. ${trendNote} For ${householdDesc}${
         profile.respiratorySensitivity !== 'none'
           ? ` with ${profile.respiratorySensitivity} respiratory sensitivity preference`
           : ''
@@ -106,7 +126,9 @@ export function generateFallbackDailyPlan(
     avoidToday.push(
       profile.children > 0
         ? 'Vigorous outdoor play or sports for children during peak pollution hours'
-        : 'High-exertion outdoor exercise near busy roads',
+        : profile.olderAdults > 0
+          ? 'Extended early-morning or evening outdoor walks for older adults during peak pollution hours'
+          : 'High-exertion outdoor exercise near busy roads',
     );
   }
   if (profile.commuteType === 'two_wheeler' || profile.commuteType === 'cycling' || profile.commuteType === 'walking') {
@@ -118,7 +140,7 @@ export function generateFallbackDailyPlan(
   } else if (profile.commuteType === 'car') {
     avoidToday.push('Leaving car ventilation on fresh-air intake or idling in slow traffic queues');
   }
-  if (air.summary.trendDirection === 'worsening' && peakWinText) {
+  if (trendDirection === 'worsening' && peakWinText) {
     avoidToday.push(`Keeping windows open into the worsening ${peakWinText} window`);
   } else if (high) {
     avoidToday.push('Indoor smoke sources such as incense, dhoop, or unvented high-heat frying');
@@ -165,13 +187,15 @@ export function generateFallbackDailyPlan(
     ? profile.hasAirPurifier
       ? 'Close outside windows now and switch your air purifier to medium-high in the primary family room.'
       : 'Close street-facing windows now, seal obvious door drafts with a rolled towel, and move planned outdoor activity indoors.'
-    : air.summary.trendDirection === 'worsening'
+    : trendDirection === 'worsening'
       ? 'Air quality is forecast to worsen later — complete any quick ventilation and essential outdoor errands earlier while levels are comparatively lower.'
       : elevated
         ? profile.commuteType === 'two_wheeler' || profile.commuteType === 'cycling'
           ? 'Pack a well-fitted N95 mask before heading out and switch high-effort workouts indoors.'
           : 'Switch car AC to cabin recirculation or plan outdoor walks for the relatively lower forecast window.'
-        : 'Take advantage of moderate conditions for a 15-minute cross-ventilation refresh and plan one lower-emission errand or commute swap.';
+        : !aqiAvailable
+          ? 'Keep street-facing windows closed until fresh readings load, and avoid unnecessary indoor smoke sources.'
+          : 'Take advantage of moderate conditions for a 15-minute cross-ventilation refresh and plan one lower-emission errand or commute swap.';
 
   // Morning block
   const morning: PlanItem[] = [
@@ -198,11 +222,11 @@ export function generateFallbackDailyPlan(
                 ? 'Prefer enclosed metro or AC bus coaches over open waiting stops along busy junctions, and wear an N95 mask if AQI exceeds 150.'
                 : 'Keep windows closed if early-morning inversion haze is visible outside, and check the midday forecast before airing out your room.',
       whyRecommended: high
-        ? `Morning traffic and cool boundary-layer air trap ${dominantMeta.symbol} near street level (currently ${aqi} US AQI).`
+        ? `Morning traffic and cool boundary-layer air trap ${dominantMeta.symbol} near street level (currently ${aqiDisplay}).`
         : `Morning rush hour elevates roadside NO₂ and particulates even when regional AQI is ${cat.shortLabel.toLowerCase()}.`,
       triggers: [
         `Commute: ${commuteLabel} (${profile.commuteDistanceKm} km)`,
-        `Current US AQI: ${aqi}`,
+        aqiTrigger,
         `Dominant pollutant: ${dominantMeta.symbol}`,
       ],
       expectedBenefit:
@@ -223,26 +247,28 @@ export function generateFallbackDailyPlan(
           ? 'Adjust your preferred morning outdoor time'
           : 'Morning home prep & ventilation check',
       action:
-        air.summary.trendDirection === 'worsening' && !high
-          ? `Because air is forecast to worsen later (${air.summary.trendNote.toLowerCase()}), do a brief 15-minute window refresh and finish quick outdoor errands before noon.`
+        trendDirection === 'worsening' && !high
+          ? `Because air is forecast to worsen later (${trendNote.toLowerCase()}), do a brief 15-minute window refresh and finish quick outdoor errands before noon.`
           : high || (elevated && hasSensitiveGroup)
-            ? `Move morning ${
-                profile.children > 0 ? 'family play or ' : ''
-              }workouts indoors (stretching, yoga, indoor games) rather than exercising in early-morning smog.`
+            ? profile.children > 0
+              ? 'Move morning children’s play and family workouts indoors (stretching, indoor games) rather than exercising in early-morning smog.'
+              : profile.olderAdults > 0
+                ? 'Swap early-morning outdoor walks for gentle indoor stretching or hallway mobility for older adults until midday air disperses.'
+                : 'Move morning workouts indoors (stretching, yoga, home cardio) rather than exercising in early-morning smog.'
             : 'Light morning outdoor movement is reasonable; keep high-intensity cardio away from busy main roads.',
       whyRecommended:
-        air.summary.trendDirection === 'worsening'
+        trendDirection === 'worsening'
           ? 'Hourly forecast shows cleaner air earlier in the day before evening buildup.'
           : `Early morning temperatures often trap overnight ${dominantMeta.symbol} close to the ground.`,
       triggers: [
         `Preferred window: ${profile.outdoorWindow.replace('_', ' ')}`,
         `Household: ${householdDesc}`,
-        `6h trend: ${air.summary.trendDirection}`,
+        `6h trend: ${trendDirection}`,
       ],
       expectedBenefit:
         'Prevents deep lung deposition of fine particles during elevated breathing rates.',
       impactCategory: 'personal_exposure',
-      priority: high || air.summary.trendDirection === 'worsening' ? 'high' : 'medium',
+      priority: high || trendDirection === 'worsening' ? 'high' : 'medium',
       timeframe: '06:30 – 10:00',
     },
   ];
@@ -260,7 +286,7 @@ export function generateFallbackDailyPlan(
       whyRecommended:
         'Midday warming typically lifts the urban atmospheric boundary layer slightly, dispersing trapped morning particulates.',
       triggers: [
-        lowerWinText ? `Relatively lower window: ${lowerWinText}` : `Current US AQI: ${aqi}`,
+        lowerWinText ? `Relatively lower window: ${lowerWinText}` : aqiTrigger,
         `Home ventilation: ${profile.ventilationOption.replace('_', ' ')}`,
       ],
       expectedBenefit:
@@ -309,7 +335,7 @@ export function generateFallbackDailyPlan(
       triggers: [
         `Cooking setup: ${profile.cookingFuel.replace('_', ' ')}`,
         `Home: ${profile.homeType.replace('_', ' ')}`,
-        peakWinText ? `Peak window: ${peakWinText}` : `Current US AQI: ${aqi}`,
+        peakWinText ? `Peak window: ${peakWinText}` : aqiTrigger,
       ],
       expectedBenefit:
         'Prevents indoor PM2.5 and NO₂ spikes during dinner preparation while keeping outdoor smog outside.',
@@ -331,7 +357,9 @@ export function generateFallbackDailyPlan(
         : `Wet-wipe dusty sills and damp-mop floors instead of dry sweeping, seal noticeable window gaps before nightfall, and plan ${
             profile.children > 0
               ? 'indoor storytime or board games'
-              : 'indoor mobility or reading'
+              : profile.olderAdults > 0
+                ? 'quiet indoor reading and low-draft bedroom prep for older adults'
+                : 'indoor mobility or reading'
           } instead of late-evening outdoor walks.`,
       whyRecommended:
         'Overnight cooling often concentrates fine particulates outdoors; reducing indoor dust resuspension keeps sleeping air cleaner.',
@@ -348,7 +376,7 @@ export function generateFallbackDailyPlan(
   ];
 
   // Tomorrow block
-  const tOutlook = air.summary.tomorrowOutlook;
+  const tOutlook = air.summary?.tomorrowOutlook ?? null;
   const tomorrow: PlanItem[] = [
     {
       id: 't-outlook',
@@ -432,29 +460,36 @@ export function generateFallbackAskResponse(
   fallbackCode: FallbackCode = 'missing_key',
 ): AskSaansResponse {
   const q = question.toLowerCase();
-  const aqi = air.current.usAqi;
-  const pm25 = air.current.pm25;
+  const aqi = sanitizeNumericReading(air.current?.usAqi);
+  const aqiAvailable = aqi !== null;
+  const aqiDisplay = aqiAvailable ? `${aqi} US AQI` : 'AQI currently unavailable';
+  const pm25 = sanitizeNumericReading(air.current?.pm25);
   const cat = getUsAqiCategory(aqi);
-  const dominantMeta = POLLUTANT_META[air.summary.dominantPollutant];
-  const lowerWin = air.summary.lowerWindow
+  const locationName = getSafeLocationName(air);
+  const dominantMeta = getSafeDominantMeta(air);
+  const trendDirection = air.summary?.trendDirection ?? 'stable';
+  const trendNote =
+    air.summary?.trendNote?.trim() ||
+    'Hourly forecast trend is currently unavailable.';
+  const lowerWin = air.summary?.lowerWindow
     ? `${formatTimeRange(
         air.summary.lowerWindow.startTime,
         air.summary.lowerWindow.endTime,
       )} (~${air.summary.lowerWindow.avgUsAqi} US AQI)`
     : null;
-  const high = (aqi ?? 0) >= 151;
-  const elevated = (aqi ?? 0) >= 101;
+  const high = aqiAvailable && aqi >= 151;
+  const elevated = aqiAvailable && aqi >= 101;
   const hasSensitive =
     profile.children > 0 ||
     profile.olderAdults > 0 ||
     profile.respiratorySensitivity !== 'none';
 
   const dataPointsUsed: string[] = [
-    `Location: ${air.location.name} (${air.isDemo ? 'Demo scenario' : 'Open-Meteo CAMS model'})`,
-    `Current US AQI: ${aqi ?? 'Unavailable'} (${cat.label})`,
+    `Location: ${locationName} (${air.isDemo ? 'Demo scenario' : 'Open-Meteo CAMS model'})`,
+    `Current US AQI: ${aqiAvailable ? aqi : 'Unavailable'} (${cat.label})`,
     ...(pm25 !== null ? [`PM2.5: ${pm25} µg/m³`] : []),
     `Dominant pollutant: ${dominantMeta.symbol}`,
-    `6h trend: ${air.summary.trendDirection}`,
+    `6h trend: ${trendDirection}`,
   ];
 
   let answer = '';
@@ -463,14 +498,19 @@ export function generateFallbackAskResponse(
 
   if (q.includes('walk') || q.includes('run') || q.includes('exercise') || q.includes('park') || q.includes('child') || q.includes('outside')) {
     impactFraming = 'personal_exposure';
-    if (high) {
+    if (!aqiAvailable) {
+      answer = `Live modelled AQI readings for ${locationName} are currently unavailable, so SAANS cannot confirm outdoor air conditions right now. For ${describeHouseholdShort(
+        profile,
+      )}, take a precautionary approach: keep vigorous exercise indoors or choose a brief, low-exertion walk away from busy roads only if visibility looks clear, and recheck once live readings refresh.`;
+      keyTakeaway = 'AQI is unavailable right now — take a precautionary approach and recheck live readings before vigorous outdoor exercise.';
+    } else if (high) {
       const activityPhrase =
         profile.children > 0
           ? 'walking, running, or children’s active play'
           : profile.olderAdults > 0
             ? 'brisk walks and morning/evening outdoor strolls'
             : 'outdoor walking, running, or cardio';
-      answer = `Right now in ${air.location.name}, modelled air quality is ${cat.label} (${aqi} US AQI${
+      answer = `Right now in ${locationName}, modelled air quality is ${cat.label} (${aqiDisplay}${
         pm25 !== null ? `, PM2.5 ${pm25} µg/m³` : ''
       }), with ${dominantMeta.symbol} as the main concern. For ${describeHouseholdShort(
         profile,
@@ -481,7 +521,7 @@ export function generateFallbackAskResponse(
       }`;
       keyTakeaway = `Move exercise indoors now; ${lowerWin ? `use ${lowerWin} only for brief, low-exertion errands.` : 'wait for conditions to ease.'}`;
     } else if (elevated) {
-      answer = `Modelled air in ${air.location.name} is currently ${cat.label} (${aqi} US AQI). ${
+      answer = `Modelled air in ${locationName} is currently ${cat.label} (${aqiDisplay}). ${
         hasSensitive
           ? 'Because your household includes children, older adults, or a respiratory sensitivity preference, keep outdoor walks short and gentle rather than vigorous.'
           : 'A light walk away from busy traffic corridors is workable, while intense cardio is better indoors.'
@@ -489,12 +529,12 @@ export function generateFallbackAskResponse(
         lowerWin
           ? `The relatively lower-pollution forecast window is ${lowerWin} — aiming your walk there reduces exposure compared to rush-hour peaks.`
           : ''
-      }`;
+      }`.trim();
       keyTakeaway = lowerWin
         ? `Keep outdoor activity light or shift to ${lowerWin}.`
         : 'Prefer light walks on quieter streets over vigorous outdoor workouts.';
     } else {
-      answer = `Modelled air quality in ${air.location.name} is currently ${cat.label} (${aqi} US AQI${
+      answer = `Modelled air quality in ${locationName} is currently ${cat.label} (${aqiDisplay}${
         pm25 !== null ? `, PM2.5 ${pm25} µg/m³` : ''
       }). This is a reasonable time for a walk or light outdoor activity, especially along quieter residential roads away from idling vehicles.\n\nRemember that Open-Meteo provides regional modelled estimates rather than street-level sensors, so if you notice visible dust or smoke nearby, cut the walk short.`;
       keyTakeaway = 'Suitable for a walk on quieter streets; watch for localized dust or traffic smoke.';
@@ -503,9 +543,9 @@ export function generateFallbackAskResponse(
     impactFraming = 'personal_exposure';
     answer = `For your ${profile.homeType.replace('_', ' ')} (${
       profile.hasAirPurifier ? 'with an air purifier' : 'without an air purifier'
-    }, ${profile.cookingFuel.replace('_', ' ')} cooking) under ${cat.label} air (${aqi} US AQI):\n\n1. **Windows & Ventilation**: ${
-      high
-        ? 'Keep exterior windows closed now, especially on street-facing sides. Only do a brief 10-minute air refresh if the afternoon forecast eases noticeably.'
+    }, ${profile.cookingFuel.replace('_', ' ')} cooking) under ${cat.label} air (${aqiDisplay}):\n\n1. **Windows & Ventilation**: ${
+      high || !aqiAvailable
+        ? 'Keep exterior windows closed now, especially on street-facing sides. Only do a brief 10-minute air refresh if updated readings or the afternoon forecast ease noticeably.'
         : lowerWin
           ? `Plan a short 15–20 minute cross-ventilation refresh around ${lowerWin}, then close windows before evening pollution rises.`
           : 'Ventilate briefly during lower-traffic midday hours and close windows if haze increases.'
@@ -518,12 +558,12 @@ export function generateFallbackAskResponse(
         ? 'Run your HEPA purifier continuously in the main occupied room with doors shut.'
         : 'Damp-mop floors instead of dry sweeping and block visible door drafts with a cloth strip — practical zero-cost steps without needing new hardware.'
     }`;
-    keyTakeaway = high
+    keyTakeaway = high || !aqiAvailable
       ? 'Keep windows sealed, control cooking fumes, and protect sleeping rooms.'
       : 'Time brief ventilation to lower-AQI hours and minimize indoor smoke sources.';
   } else if (q.includes('commute') || q.includes('office') || q.includes('drive') || q.includes('car') || q.includes('bike') || q.includes('bus') || q.includes('metro')) {
     impactFraming = 'both';
-    answer = `Looking at your **${getCommuteLabel(profile.commuteType)}** (~${profile.commuteDistanceKm} km each way) and current ${cat.label} air (${aqi} US AQI):\n\n- **Personal exposure**: ${
+    answer = `Looking at your **${getCommuteLabel(profile.commuteType)}** (~${profile.commuteDistanceKm} km each way) and current ${cat.label} air (${aqiDisplay}):\n\n- **Personal exposure**: ${
       profile.commuteType === 'two_wheeler' || profile.commuteType === 'cycling' || profile.commuteType === 'walking'
         ? high
           ? 'Open-air commuting puts you directly in roadway particulate plumes. Switching to enclosed metro/AC bus today or wearing a well-fitted N95 mask significantly reduces what you breathe.'
@@ -535,17 +575,17 @@ export function generateFallbackAskResponse(
     keyTakeaway = 'Separate exposure protection (enclosed transit/N95/recirculate) from emissions impact (shared transit, batching trips, zero idling).';
   } else if (q.includes('tomorrow') || q.includes('forecast') || q.includes('later')) {
     impactFraming = 'personal_exposure';
-    const t = air.summary.tomorrowOutlook;
+    const t = air.summary?.tomorrowOutlook ?? null;
     answer = t
-      ? `Tomorrow’s modelled forecast for ${air.location.name} shows US AQI between **${t.minUsAqi} and ${t.maxUsAqi}** (average ~${t.avgUsAqi}, which looks **${t.directionVsToday}** compared to today).\n\nTonight, you can prepare by ${
+      ? `Tomorrow’s modelled forecast for ${locationName} shows US AQI between **${t.minUsAqi} and ${t.maxUsAqi}** (average ~${t.avgUsAqi}, which looks **${t.directionVsToday}** compared to today).\n\nTonight, you can prepare by ${
           t.avgUsAqi >= 151
             ? 'arranging indoor backup activities, checking N95 masks, and exploring enclosed transit or WFH options if possible.'
             : 'planning quick errands and short home ventilation for the relatively lower midday window.'
         } Always recheck live conditions in the morning because atmospheric models update as wind patterns shift.`
-      : `Your current 6-hour trend is **${air.summary.trendDirection}** (${air.summary.trendNote}). Full next-day hourly points are currently limited, so recheck SAANS tomorrow morning before setting your outdoor schedule.`;
+      : `Your current 6-hour trend is **${trendDirection}** (${trendNote}). Full next-day hourly points are currently limited, so recheck SAANS tomorrow morning before setting your outdoor schedule.`;
     keyTakeaway = t
       ? `Tomorrow averages ~${t.avgUsAqi} US AQI (${t.directionVsToday} vs today) — plan commute & indoor backups tonight.`
-      : `Current 6h trend is ${air.summary.trendDirection}; recheck in the morning.`;
+      : `Current 6h trend is ${trendDirection}; recheck in the morning.`;
   } else if (q.includes('footprint') || q.includes('emission') || q.includes('sustain') || q.includes('reduce') || q.includes('impact')) {
     impactFraming = 'wider_emissions';
     answer = `Practical low-emission shifts that fit ${describeHouseholdShort(
@@ -556,20 +596,20 @@ export function generateFallbackAskResponse(
     keyTakeaway = 'Focus on commute mode swaps, batching errands, zero idling, and avoiding open burning — tracked separately from personal exposure protection.';
   } else {
     impactFraming = 'both';
-    answer = `In ${air.location.name}, modelled air quality is currently **${cat.label}** (**${aqi ?? 'N/A'} US AQI**${
+    answer = `In ${locationName}, modelled air quality is currently **${cat.label}** (**${aqiDisplay}**${
       pm25 !== null ? `, PM2.5 ${pm25} µg/m³` : ''
-    }), with **${dominantMeta.symbol}** as the dominant pollutant. ${air.summary.trendNote}\n\nFor ${describeHouseholdShort(
+    }), with **${dominantMeta.symbol}** as the dominant pollutant. ${trendNote}\n\nFor ${describeHouseholdShort(
       profile,
     )} (${getCommuteLabel(profile.commuteType)}, ${
       profile.hasAirPurifier ? 'HEPA purifier available' : 'no air purifier'
     }):\n- **Personal exposure**: ${
-      high
+      high || !aqiAvailable
         ? 'Prioritise indoor routines, keep outside windows shut, and use an N95 mask for essential outdoor trips.'
         : lowerWin
           ? `Schedule outdoor errands and brief ventilation around ${lowerWin}.`
           : 'Keep strenuous activity away from heavy traffic corridors.'
     }\n- **Wider emissions**: Batch errands into one trip, switch off engines while idling, and shift trips to public transit or carpooling when feasible.`;
-    keyTakeaway = `${cat.label} (${aqi ?? 'N/A'} US AQI) driven by ${dominantMeta.symbol}; ${air.summary.trendDirection} 6-hour trend.`;
+    keyTakeaway = `${cat.label} (${aqiDisplay}) driven by ${dominantMeta.symbol}; ${trendDirection} 6-hour trend.`;
   }
 
   return {

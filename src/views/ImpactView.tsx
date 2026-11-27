@@ -29,6 +29,7 @@ import {
   type TransportModeId,
 } from '@shared/emissions';
 import { DEFAULT_CHALLENGES } from '@shared/demoScenarios';
+import type { CommuteType } from '@shared/types';
 import { useSaans } from '@/context/SaansContext';
 import { ImpactCategoryBadge } from '@/components/StatusBadges';
 
@@ -40,9 +41,7 @@ interface ChallengeProgressState {
   lastLoggedDate: string | null;
 }
 
-function mapProfileCommuteToMode(
-  commute: string,
-): TransportModeId {
+function mapProfileCommuteToMode(commute: CommuteType): TransportModeId {
   switch (commute) {
     case 'car':
       return 'petrol_car_solo';

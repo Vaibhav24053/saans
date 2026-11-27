@@ -87,30 +87,44 @@ export function LocationSearchModal({
     if (!open) return;
     const trimmed = query.trim();
     if (trimmed.length < 2) {
-      setResults([]);
-      setError(null);
       return;
     }
 
+    let active = true;
     const timer = setTimeout(async () => {
+      if (!active) return;
       setSearching(true);
       setError(null);
       try {
         const list = await searchCities(trimmed);
-        setResults(list);
+        if (active) setResults(list);
       } catch (err) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : 'City search failed. Try again or pick a quick city below.',
-        );
+        if (active) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : 'City search failed. Try again or pick a quick city below.',
+          );
+        }
       } finally {
-        setSearching(false);
+        if (active) setSearching(false);
       }
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [query, open]);
+
+  const handleQueryChange = (value: string) => {
+    setQuery(value);
+    if (value.trim().length < 2) {
+      setResults([]);
+      setError(null);
+      setSearching(false);
+    }
+  };
 
   if (!open) return null;
 
@@ -190,7 +204,7 @@ export function LocationSearchModal({
               <input
                 type="text"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => handleQueryChange(e.target.value)}
                 placeholder="Search city or town (e.g., Delhi, Pune, Jaipur)..."
                 className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-[#D4D0C4] bg-[#FAF9F6] focus:bg-white focus:border-[#2D6A4F] outline-none transition-colors"
                 autoFocus

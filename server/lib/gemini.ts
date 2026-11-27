@@ -1,5 +1,10 @@
 import { GoogleGenAI, Type } from '@google/genai';
-import { formatTimeRange, getUsAqiCategory, POLLUTANT_META } from '../../shared/aqi.js';
+import {
+  findCurrentHourIndex,
+  formatTimeRange,
+  getUsAqiCategory,
+  POLLUTANT_META,
+} from '../../shared/aqi.js';
 import {
   AskSaansPayloadSchema,
   DailyPlanPayloadSchema,
@@ -13,6 +18,21 @@ import {
   generateFallbackAskResponse,
   generateFallbackDailyPlan,
 } from './fallbackEngine.js';
+
+export interface GeminiContentClient {
+  models: {
+    generateContent: (params: {
+      model: string;
+      contents: string;
+      config?: Record<string, unknown>;
+    }) => Promise<{ text?: string }>;
+  };
+}
+
+export interface GeminiCallOptions {
+  client?: GeminiContentClient;
+  retryOptions?: RetryOptions;
+}
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 
@@ -39,6 +59,7 @@ export function sanitizeErrorText(text: string): string {
   return sanitized
     .replace(/([?&](?:key|api_key|apikey|token)=)[^&\s"']+/gi, '$1[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1[REDACTED]')
+    .replace(/\b(x-goog-api-key\s*[:=]\s*)[^\s"',}]+/gi, '$1[REDACTED]')
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED]')
     .replace(/\bAQ\.[0-9A-Za-z._-]{20,}\b/g, '[REDACTED]');
 }
@@ -253,9 +274,7 @@ function buildCompactContext(profile: HouseholdProfile, air: AirQualityData) {
   const cat = getUsAqiCategory(air.current.usAqi);
   const dominantMeta = POLLUTANT_META[air.summary.dominantPollutant];
 
-  const currentPrefix = air.currentTimeLocal.slice(0, 13);
-  let startIdx = air.hourly.findIndex((h) => h.time.startsWith(currentPrefix));
-  if (startIdx < 0) startIdx = 0;
+  const startIdx = findCurrentHourIndex(air.hourly, air.currentTimeLocal);
   const sampledHourly = air.hourly
     .slice(startIdx, startIdx + 24)
     .filter((_, idx) => idx % 2 === 0)
@@ -437,9 +456,10 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export async function generateDailyPlan(
   profile: HouseholdProfile,
   air: AirQualityData,
+  options: GeminiCallOptions = {},
 ): Promise<DailyPlanResponse> {
   const model = getConfiguredModel();
-  const ai = getAiClient();
+  const ai: GeminiContentClient | null = options.client ?? getAiClient();
   if (!ai) {
     return generateFallbackDailyPlan(
       profile,
@@ -475,7 +495,13 @@ ${JSON.stringify(context, null, 2)}`;
           },
         }),
       model,
-      { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 2000, attemptTimeoutMs: 20000 },
+      {
+        maxRetries: 2,
+        baseDelayMs: 500,
+        maxDelayMs: 2000,
+        attemptTimeoutMs: 20000,
+        ...options.retryOptions,
+      },
     );
 
     const text = response.text;
@@ -513,9 +539,10 @@ export async function askSaansAssistant(
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   profile: HouseholdProfile,
   air: AirQualityData,
+  options: GeminiCallOptions = {},
 ): Promise<AskSaansResponse> {
   const model = getConfiguredModel();
-  const ai = getAiClient();
+  const ai: GeminiContentClient | null = options.client ?? getAiClient();
   if (!ai) {
     return generateFallbackAskResponse(
       question,
@@ -556,7 +583,13 @@ Keep the answer crisp (2-4 short paragraphs or bullet points), cite the exact su
           },
         }),
       model,
-      { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 2000, attemptTimeoutMs: 18000 },
+      {
+        maxRetries: 2,
+        baseDelayMs: 500,
+        maxDelayMs: 2000,
+        attemptTimeoutMs: 18000,
+        ...options.retryOptions,
+      },
     );
 
     const text = response.text;

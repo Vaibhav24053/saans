@@ -150,6 +150,147 @@ export interface AirQualityData {
   summary: AirQualitySummary;
 }
 
+export const LocationInfoSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  admin1: z.string().max(160).optional(),
+  country: z.string().max(160),
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+  timezone: z.string().min(1).max(100),
+  source: z.enum(['geocoding', 'geolocation', 'demo']),
+});
+
+export const HouseholdProfileSchema = z.object({
+  householdName: z.string().max(120),
+  location: LocationInfoSchema,
+  adults: z.number().int().min(0).max(20),
+  children: z.number().int().min(0).max(20),
+  olderAdults: z.number().int().min(0).max(20),
+  respiratorySensitivity: z.enum(['none', 'mild', 'elevated']),
+  commuteType: z.enum([
+    'public_transport',
+    'car',
+    'two_wheeler',
+    'walking',
+    'cycling',
+    'wfh',
+  ]),
+  commuteDistanceKm: z.number().finite().min(0).max(300),
+  outdoorWindow: z.enum([
+    'early_morning',
+    'mid_morning',
+    'afternoon',
+    'evening',
+    'flexible',
+  ]),
+  homeType: z.enum(['apartment', 'independent_house', 'other']),
+  hasAirPurifier: z.boolean(),
+  ventilationOption: z.enum([
+    'cross_ventilation',
+    'exhaust_fan',
+    'ac_recirculate',
+    'limited',
+  ]),
+  cookingFuel: z.enum(['lpg_gas', 'induction_electric', 'mixed']),
+  sustainabilityFocus: z.enum([
+    'exposure_first',
+    'balanced',
+    'low_emission_priority',
+  ]),
+  budgetPreference: z.enum(['zero_cost', 'moderate', 'flexible']),
+  onboardingCompleted: z.boolean(),
+});
+
+const NullableFiniteNumberSchema = z.number().finite().nullable();
+
+export const HourlyAirPointSchema = z.object({
+  time: z.string().min(4).max(40),
+  usAqi: NullableFiniteNumberSchema,
+  europeanAqi: NullableFiniteNumberSchema,
+  pm25: NullableFiniteNumberSchema,
+  pm10: NullableFiniteNumberSchema,
+  no2: NullableFiniteNumberSchema,
+  so2: NullableFiniteNumberSchema,
+  o3: NullableFiniteNumberSchema,
+  usAqiPm25: NullableFiniteNumberSchema.optional(),
+  usAqiPm10: NullableFiniteNumberSchema.optional(),
+  usAqiNo2: NullableFiniteNumberSchema.optional(),
+  usAqiSo2: NullableFiniteNumberSchema.optional(),
+  usAqiO3: NullableFiniteNumberSchema.optional(),
+});
+
+export const AirWindowSchema = z.object({
+  startTime: z.string().min(4).max(40),
+  endTime: z.string().min(4).max(40),
+  avgUsAqi: z.number().finite(),
+  peakUsAqi: z.number().finite(),
+  avgPm25: z.number().finite(),
+});
+
+export const AirQualitySummarySchema = z.object({
+  dominantPollutant: z.enum(['pm25', 'pm10', 'no2', 'so2', 'o3']),
+  dominantPollutantLabel: z.string().min(1).max(160),
+  trendDirection: z.enum(['improving', 'stable', 'worsening']),
+  trendDelta6h: z.number().finite(),
+  trendNote: z.string().max(400),
+  peakWindow: AirWindowSchema.nullable(),
+  lowerWindow: AirWindowSchema.nullable(),
+  tomorrowOutlook: z
+    .object({
+      avgUsAqi: z.number().finite(),
+      maxUsAqi: z.number().finite(),
+      minUsAqi: z.number().finite(),
+      directionVsToday: z.enum(['better', 'similar', 'worse']),
+    })
+    .nullable(),
+});
+
+export const AirQualityDataSchema = z.object({
+  location: LocationInfoSchema,
+  fetchedAt: z.string().min(1).max(60),
+  currentTimeLocal: z.string().min(4).max(40),
+  timezone: z.string().min(1).max(100),
+  isDemo: z.boolean(),
+  demoScenarioId: z
+    .enum(['moderate_haze', 'severe_winter_smog', 'worsening_inversion'])
+    .optional(),
+  demoScenarioName: z.string().max(120).optional(),
+  modelDomain: z.enum(['cams_global', 'cams_europe', 'demo']),
+  modelName: z.string().min(1).max(160),
+  spatialResolutionLabel: z.string().min(1).max(160),
+  attribution: z.string().max(500),
+  dataSourceLabel: z.string().max(200),
+  dataIntegrityNote: z.string().max(800),
+  current: z.object({
+    usAqi: NullableFiniteNumberSchema,
+    europeanAqi: NullableFiniteNumberSchema,
+    pm25: NullableFiniteNumberSchema,
+    pm10: NullableFiniteNumberSchema,
+    no2: NullableFiniteNumberSchema,
+    so2: NullableFiniteNumberSchema,
+    o3: NullableFiniteNumberSchema,
+  }),
+  hourly: z.array(HourlyAirPointSchema).max(240),
+  summary: AirQualitySummarySchema,
+});
+
+export const ChatHistoryItemSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1).max(4000),
+});
+
+export const DailyPlanRequestSchema = z.object({
+  profile: HouseholdProfileSchema,
+  airData: AirQualityDataSchema,
+});
+
+export const AskSaansRequestSchema = z.object({
+  question: z.string().trim().min(1).max(1000),
+  history: z.array(ChatHistoryItemSchema).max(20).optional().default([]),
+  profile: HouseholdProfileSchema,
+  airData: AirQualityDataSchema,
+});
+
 export const PlanItemSchema = z.object({
   id: z.string(),
   title: z.string().min(2),

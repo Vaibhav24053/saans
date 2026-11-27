@@ -91,23 +91,37 @@ export function OnboardingFlow() {
   useEffect(() => {
     const trimmed = cityQuery.trim();
     if (trimmed.length < 2) {
-      setCityResults([]);
       return;
     }
+    let active = true;
     const timer = setTimeout(async () => {
+      if (!active) return;
       setSearching(true);
       setLocError(null);
       try {
         const res = await searchCities(trimmed);
-        setCityResults(res);
+        if (active) setCityResults(res);
       } catch {
-        setLocError('Search temporarily unavailable — pick a quick city or try Demo Mode.');
+        if (active) {
+          setLocError('Search temporarily unavailable — pick a quick city or try Demo Mode.');
+        }
       } finally {
-        setSearching(false);
+        if (active) setSearching(false);
       }
     }, 300);
-    return () => clearTimeout(timer);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [cityQuery]);
+
+  const handleCityQueryChange = (value: string) => {
+    setCityQuery(value);
+    if (value.trim().length < 2) {
+      setCityResults([]);
+      setSearching(false);
+    }
+  };
 
   const handleGeolocation = () => {
     if (!navigator.geolocation) {
@@ -266,7 +280,7 @@ export function OnboardingFlow() {
                   <input
                     type="text"
                     value={cityQuery}
-                    onChange={(e) => setCityQuery(e.target.value)}
+                    onChange={(e) => handleCityQueryChange(e.target.value)}
                     placeholder="Search your city (e.g., New Delhi, Bengaluru, Jaipur)..."
                     className="w-full pl-10 pr-4 py-3 text-sm rounded-xl border border-[#D4D0C4] bg-[#FAF9F6] focus:bg-white focus:border-[#2D6A4F] outline-none"
                   />

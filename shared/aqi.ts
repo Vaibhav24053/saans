@@ -17,8 +17,12 @@ export interface AqiCategory {
   summary: string;
 }
 
+export function isValidAqiValue(aqi: number | null | undefined): aqi is number {
+  return typeof aqi === 'number' && Number.isFinite(aqi) && aqi >= 0;
+}
+
 export function getUsAqiCategory(aqi: number | null): AqiCategory {
-  if (aqi === null || Number.isNaN(aqi)) {
+  if (!isValidAqiValue(aqi)) {
     return {
       label: 'Unavailable',
       shortLabel: 'N/A',
@@ -103,7 +107,7 @@ export function getUsAqiCategory(aqi: number | null): AqiCategory {
 }
 
 export function getEuropeanAqiCategory(aqi: number | null): AqiCategory {
-  if (aqi === null || Number.isNaN(aqi)) {
+  if (!isValidAqiValue(aqi)) {
     return getUsAqiCategory(null);
   }
   if (aqi <= 20) {
@@ -157,6 +161,7 @@ export interface PollutantMetadata {
   symbol: string;
   name: string;
   unit: string;
+  whoGuidelineValue: number;
   whoReference: string;
   whatItIs: string;
   commonSources: string;
@@ -169,6 +174,7 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
     symbol: 'PM2.5',
     name: 'Fine Particulate Matter (≤ 2.5 µm)',
     unit: 'µg/m³',
+    whoGuidelineValue: 15,
     whoReference: 'WHO 24-hour guideline: 15 µg/m³',
     whatItIs:
       'Microscopic airborne particles small enough to penetrate deep into the airways and stay suspended for hours, especially during cool winter inversions.',
@@ -182,6 +188,7 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
     symbol: 'PM10',
     name: 'Coarse Particulate Matter (≤ 10 µm)',
     unit: 'µg/m³',
+    whoGuidelineValue: 45,
     whoReference: 'WHO 24-hour guideline: 45 µg/m³',
     whatItIs:
       'Larger inhalable dust and aerosol particles that irritate the eyes, nose, and upper airways and settle quickly on indoor surfaces.',
@@ -195,6 +202,7 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
     symbol: 'NO₂',
     name: 'Nitrogen Dioxide',
     unit: 'µg/m³',
+    whoGuidelineValue: 25,
     whoReference: 'WHO 24-hour guideline: 25 µg/m³',
     whatItIs:
       'A traffic-related gas that spikes sharply along busy arterial roads during rush hours and can also build up indoors from unvented gas stoves.',
@@ -208,6 +216,7 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
     symbol: 'SO₂',
     name: 'Sulphur Dioxide',
     unit: 'µg/m³',
+    whoGuidelineValue: 40,
     whoReference: 'WHO 24-hour guideline: 40 µg/m³',
     whatItIs:
       'A sharp-smelling gas produced by burning sulphur-containing fuels that contributes to secondary fine particulate formation.',
@@ -221,6 +230,7 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
     symbol: 'O₃',
     name: 'Ground-Level Ozone',
     unit: 'µg/m³',
+    whoGuidelineValue: 100,
     whoReference: 'WHO 8-hour guideline: 100 µg/m³',
     whatItIs:
       'A secondary pollutant formed when sunlight reacts with traffic emissions; unlike winter PM2.5, ozone typically peaks in bright mid-afternoon sun.',
@@ -230,6 +240,15 @@ export const POLLUTANT_META: Record<PollutantKey, PollutantMetadata> = {
       'On sunny days with elevated O₃, mornings and evenings may have lower ozone than mid-afternoon.',
   },
 };
+
+export function findCurrentHourIndex(
+  hourly: HourlyAirPoint[],
+  currentTimeLocal: string,
+): number {
+  const currentHourPrefix = currentTimeLocal.slice(0, 13);
+  const idx = hourly.findIndex((h) => h.time.startsWith(currentHourPrefix));
+  return idx >= 0 ? idx : 0;
+}
 
 export function formatHourLabel(isoLocal: string): string {
   const match = isoLocal.match(/T(\d{2}):(\d{2})/);
@@ -242,6 +261,10 @@ export function formatHourLabel(isoLocal: string): string {
 
 export function formatTimeRange(startIso: string, endIso: string): string {
   return `${formatHourLabel(startIso)} – ${formatHourLabel(endIso)}`;
+}
+
+function finiteNonNegative(val: number | null | undefined): number {
+  return typeof val === 'number' && Number.isFinite(val) && val >= 0 ? val : 0;
 }
 
 export function detectDominantPollutant(
@@ -263,8 +286,7 @@ export function detectDominantPollutant(
     { key: 'o3', val: currentHourly?.usAqiO3 },
   ];
   const validSub = subIndices.filter(
-    (s): s is { key: PollutantKey; val: number } =>
-      typeof s.val === 'number' && !Number.isNaN(s.val),
+    (s): s is { key: PollutantKey; val: number } => isValidAqiValue(s.val),
   );
   if (validSub.length > 0) {
     validSub.sort((a, b) => b.val - a.val);
@@ -273,11 +295,11 @@ export function detectDominantPollutant(
 
   // Otherwise compare relative ratios against WHO 24h / 8h guideline benchmarks
   const ratios: Array<{ key: PollutantKey; ratio: number }> = [
-    { key: 'pm25', ratio: (current.pm25 ?? 0) / 15 },
-    { key: 'pm10', ratio: (current.pm10 ?? 0) / 45 },
-    { key: 'no2', ratio: (current.no2 ?? 0) / 25 },
-    { key: 'so2', ratio: (current.so2 ?? 0) / 40 },
-    { key: 'o3', ratio: (current.o3 ?? 0) / 100 },
+    { key: 'pm25', ratio: finiteNonNegative(current.pm25) / POLLUTANT_META.pm25.whoGuidelineValue },
+    { key: 'pm10', ratio: finiteNonNegative(current.pm10) / POLLUTANT_META.pm10.whoGuidelineValue },
+    { key: 'no2', ratio: finiteNonNegative(current.no2) / POLLUTANT_META.no2.whoGuidelineValue },
+    { key: 'so2', ratio: finiteNonNegative(current.so2) / POLLUTANT_META.so2.whoGuidelineValue },
+    { key: 'o3', ratio: finiteNonNegative(current.o3) / POLLUTANT_META.o3.whoGuidelineValue },
   ];
   ratios.sort((a, b) => b.ratio - a.ratio);
   return ratios[0].key;
@@ -295,9 +317,7 @@ export function computeAirQualitySummary(
   hourly: HourlyAirPoint[],
   currentTimeLocal: string,
 ): AirQualitySummary {
-  const currentHourPrefix = currentTimeLocal.slice(0, 13);
-  let nowIdx = hourly.findIndex((h) => h.time.startsWith(currentHourPrefix));
-  if (nowIdx < 0) nowIdx = 0;
+  const nowIdx = findCurrentHourIndex(hourly, currentTimeLocal);
 
   const dominantPollutant = detectDominantPollutant(current, hourly[nowIdx]);
   const dominantPollutantLabel = `${POLLUTANT_META[dominantPollutant].symbol} (${POLLUTANT_META[dominantPollutant].name})`;
@@ -305,13 +325,25 @@ export function computeAirQualitySummary(
   const next24 = hourly.slice(nowIdx, nowIdx + 24);
   const next6 = hourly.slice(nowIdx, nowIdx + 7);
 
-  // 6-hour trend
-  const startAqi = current.usAqi ?? next6[0]?.usAqi ?? 0;
-  const end6Aqi = next6[next6.length - 1]?.usAqi ?? startAqi;
-  const trendDelta6h = Math.round(end6Aqi - startAqi);
+  // 6-hour trend (computed only from valid finite AQI values)
+  const validNext6Aqis = next6
+    .map((p) => p.usAqi)
+    .filter((v): v is number => isValidAqiValue(v));
+  const startAqi = isValidAqiValue(current.usAqi)
+    ? current.usAqi
+    : (validNext6Aqis[0] ?? null);
+  const end6Aqi =
+    validNext6Aqis.length > 0
+      ? validNext6Aqis[validNext6Aqis.length - 1]
+      : startAqi;
+  const trendDelta6h =
+    startAqi !== null && end6Aqi !== null ? Math.round(end6Aqi - startAqi) : 0;
 
   let trendDirection: 'improving' | 'stable' | 'worsening' = 'stable';
-  let trendNote = 'Modelled levels are expected to remain broadly steady over the next 6 hours.';
+  let trendNote =
+    startAqi === null || validNext6Aqis.length === 0
+      ? 'Hourly forecast trend is temporarily unavailable due to limited readings.'
+      : 'Modelled levels are expected to remain broadly steady over the next 6 hours.';
   if (trendDelta6h <= -15) {
     trendDirection = 'improving';
     trendNote = `Forecast suggests modelled US AQI easing by ~${Math.abs(trendDelta6h)} points over the next 6 hours.`;
@@ -329,10 +361,10 @@ export function computeAirQualitySummary(
       const slice = next24.slice(i, i + 3);
       const aqiVals = slice
         .map((p) => p.usAqi)
-        .filter((v): v is number => v !== null);
+        .filter((v): v is number => isValidAqiValue(v));
       const pm25Vals = slice
         .map((p) => p.pm25)
-        .filter((v): v is number => v !== null);
+        .filter((v): v is number => isValidAqiValue(v));
       if (aqiVals.length === 0) continue;
 
       const avgUsAqi = Math.round(
@@ -369,19 +401,26 @@ export function computeAirQualitySummary(
     }
   }
 
-  // Tomorrow outlook (calendar day after currentTimeLocal)
+  // Tomorrow outlook (next calendar day after currentTimeLocal)
   const todayDate = currentTimeLocal.slice(0, 10);
-  const tomorrowPoints = hourly.filter((h) => h.time.slice(0, 10) > todayDate);
+  const futureDates = hourly
+    .map((h) => h.time.slice(0, 10))
+    .filter((d) => d > todayDate)
+    .sort();
+  const tomorrowDate = futureDates[0] ?? null;
+  const tomorrowPoints = tomorrowDate
+    ? hourly.filter((h) => h.time.slice(0, 10) === tomorrowDate)
+    : [];
   const todayPoints = hourly.filter((h) => h.time.slice(0, 10) === todayDate);
 
   let tomorrowOutlook: AirQualitySummary['tomorrowOutlook'] = null;
   if (tomorrowPoints.length >= 6) {
     const tVals = tomorrowPoints
       .map((p) => p.usAqi)
-      .filter((v): v is number => v !== null);
+      .filter((v): v is number => isValidAqiValue(v));
     const todayVals = todayPoints
       .map((p) => p.usAqi)
-      .filter((v): v is number => v !== null);
+      .filter((v): v is number => isValidAqiValue(v));
 
     if (tVals.length > 0) {
       const avgUsAqi = Math.round(

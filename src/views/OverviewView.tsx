@@ -25,6 +25,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  findCurrentHourIndex,
   formatHourLabel,
   formatTimeRange,
   getAqiCategory,
@@ -123,9 +124,7 @@ export function OverviewView() {
         : 'text-[#4A5550] bg-[#F0EEE7] border-[#DDD8CC]';
 
   // Build next 24h chart data
-  const nowPrefix = airData.currentTimeLocal.slice(0, 13);
-  let nowIdx = airData.hourly.findIndex((h) => h.time.startsWith(nowPrefix));
-  if (nowIdx < 0) nowIdx = 0;
+  const nowIdx = findCurrentHourIndex(airData.hourly, airData.currentTimeLocal);
   const chartData = airData.hourly.slice(nowIdx, nowIdx + 24).map((pt) => ({
     label: formatHourLabel(pt.time),
     value: aqiScale === 'us_aqi' ? pt.usAqi : pt.europeanAqi,
@@ -293,13 +292,13 @@ export function OverviewView() {
                 </span>
               </div>
               <p className="text-[11px] text-[#717D77] mt-1.5">
-                WHO 24h ref: 15 µg/m³
+                WHO 24h ref: {POLLUTANT_META.pm25.whoGuidelineValue} µg/m³
               </p>
             </div>
             {airData.current.pm25 !== null && (
               <div className="mt-3 text-[11px] font-medium text-[#4A5550]">
-                {airData.current.pm25 > 15
-                  ? `${(airData.current.pm25 / 15).toFixed(1)}× WHO 24h benchmark`
+                {airData.current.pm25 > POLLUTANT_META.pm25.whoGuidelineValue
+                  ? `${(airData.current.pm25 / POLLUTANT_META.pm25.whoGuidelineValue).toFixed(1)}× WHO 24h benchmark`
                   : 'Within WHO 24h guideline'}
               </div>
             )}
@@ -317,13 +316,13 @@ export function OverviewView() {
                 </span>
               </div>
               <p className="text-[11px] text-[#717D77] mt-1.5">
-                WHO 24h ref: 45 µg/m³
+                WHO 24h ref: {POLLUTANT_META.pm10.whoGuidelineValue} µg/m³
               </p>
             </div>
             {airData.current.pm10 !== null && (
               <div className="mt-3 text-[11px] font-medium text-[#4A5550]">
-                {airData.current.pm10 > 45
-                  ? `${(airData.current.pm10 / 45).toFixed(1)}× WHO 24h benchmark`
+                {airData.current.pm10 > POLLUTANT_META.pm10.whoGuidelineValue
+                  ? `${(airData.current.pm10 / POLLUTANT_META.pm10.whoGuidelineValue).toFixed(1)}× WHO 24h benchmark`
                   : 'Within WHO 24h guideline'}
               </div>
             )}

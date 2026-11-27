@@ -7,11 +7,16 @@ import {
   generateDailyPlan,
   isRetryableGeminiError,
   sanitizeErrorText,
+  type GeminiContentClient,
 } from '../server/lib/gemini.ts';
 import {
   buildDemoAirQualityData,
   DEMO_PERSONAS,
 } from '../shared/demoScenarios.ts';
+import {
+  AskSaansPayloadSchema,
+  DailyPlanPayloadSchema,
+} from '../shared/types.ts';
 
 const MODEL = 'gemini-3.5-flash-lite';
 
@@ -242,5 +247,223 @@ describe('rules-based fallback preservation', () => {
     } finally {
       if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
     }
+  });
+});
+
+function makeValidPlanJson(): string {
+  const item = (id: string, impactCategory: 'personal_exposure' | 'wider_emissions' | 'both') => ({
+    id,
+    title: `Action ${id}`,
+    action: 'Take a specific practical step based on current modelled air quality.',
+    whyRecommended: 'Grounded in supplied US AQI and household setup.',
+    triggers: ['US AQI 268', 'No air purifier'],
+    expectedBenefit: 'Lowers household exposure during elevated particulate hours.',
+    impactCategory,
+    priority: 'high' as const,
+    timeframe: '08:00 – 10:00',
+  });
+
+  return JSON.stringify({
+    headline: 'Heavy PM2.5 smog in New Delhi: protect indoor air today.',
+    heroSummary: {
+      currentConditions:
+        'Modelled US AQI is 268 (Very Unhealthy) with elevated PM2.5.',
+      avoidToday: ['Vigorous outdoor play for children during peak hours'],
+      prioritiseToday: ['Keep street-facing windows shut and damp-mop indoor dust'],
+      bestLowerWindowNote:
+        'Forecast shows a relatively lower-pollution afternoon window (not completely safe).',
+      immediateAction: 'Close exterior windows and move active play indoors now.',
+    },
+    blocks: {
+      morning: [item('m1', 'personal_exposure')],
+      afternoon: [item('a1', 'wider_emissions')],
+      evening: [item('e1', 'personal_exposure')],
+      tomorrow: [item('t1', 'both')],
+    },
+    transparencyNote:
+      'Generated from supplied modelled environmental readings and household preferences.',
+  });
+}
+
+function makeValidAskJson(): string {
+  return JSON.stringify({
+    answer:
+      'Modelled US AQI in New Delhi is 268 (Very Unhealthy). Move outdoor walks indoors and use enclosed transit if travel is essential.',
+    keyTakeaway: 'Avoid outdoor walks now and keep exterior windows closed.',
+    impactFraming: 'personal_exposure',
+    dataPointsUsed: ['Location: New Delhi', 'US AQI: 268'],
+    followUpSuggestions: ['When should I ventilate my home?'],
+  });
+}
+
+describe('Gemini integration with deterministic mocked client', () => {
+  const noDelayRetry = {
+    maxRetries: 2,
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+    sleep: async () => {},
+  };
+
+  it('accepts valid structured JSON from Gemini for daily plan and Ask SAANS', async () => {
+    const airData = buildDemoAirQualityData('severe_winter_smog');
+    const profile = {
+      ...DEMO_PERSONAS[0].profile,
+      location: airData.location,
+      onboardingCompleted: true,
+    };
+
+    const planClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => ({ text: makeValidPlanJson() }),
+      },
+    };
+    const plan = await generateDailyPlan(profile, airData, {
+      client: planClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(plan.source, 'gemini');
+    assert.equal(DailyPlanPayloadSchema.safeParse(plan).success, true);
+
+    const askClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => ({ text: makeValidAskJson() }),
+      },
+    };
+    const ask = await askSaansAssistant('Can I walk outside?', [], profile, airData, {
+      client: askClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(ask.source, 'gemini');
+    assert.equal(AskSaansPayloadSchema.safeParse(ask).success, true);
+  });
+
+  it('falls back immediately without retrying when Gemini returns invalid JSON or fails schema validation', async () => {
+    const airData = buildDemoAirQualityData('severe_winter_smog');
+    const profile = {
+      ...DEMO_PERSONAS[0].profile,
+      location: airData.location,
+      onboardingCompleted: true,
+    };
+
+    let planAttempts = 0;
+    const invalidSchemaPlanClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => {
+          planAttempts++;
+          return { text: JSON.stringify({ headline: 'Too short' }) };
+        },
+      },
+    };
+    const plan = await generateDailyPlan(profile, airData, {
+      client: invalidSchemaPlanClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(planAttempts, 1);
+    assert.equal(plan.source, 'fallback');
+    assert.equal(plan.fallbackCode, 'validation_failed');
+    assert.equal(DailyPlanPayloadSchema.safeParse(plan).success, true);
+
+    let askAttempts = 0;
+    const malformedAskClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => {
+          askAttempts++;
+          return { text: 'not valid json {' };
+        },
+      },
+    };
+    const ask = await askSaansAssistant('Should I open windows?', [], profile, airData, {
+      client: malformedAskClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(askAttempts, 1);
+    assert.equal(ask.source, 'fallback');
+    assert.equal(ask.fallbackCode, 'validation_failed');
+    assert.equal(AskSaansPayloadSchema.safeParse(ask).success, true);
+  });
+
+  it('retries transient upstream 503 failures up to retry limit and falls back cleanly after exhaustion', async () => {
+    const airData = buildDemoAirQualityData('severe_winter_smog');
+    const profile = {
+      ...DEMO_PERSONAS[0].profile,
+      location: airData.location,
+      onboardingCompleted: true,
+    };
+
+    // Succeeds on 3rd attempt (2 retries)
+    let recoveryAttempts = 0;
+    const recoveringClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => {
+          recoveryAttempts++;
+          if (recoveryAttempts < 3) {
+            throw makeApiError(503, 'Service Unavailable');
+          }
+          return { text: makeValidAskJson() };
+        },
+      },
+    };
+    const recovered = await askSaansAssistant('Walk now?', [], profile, airData, {
+      client: recoveringClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(recoveryAttempts, 3);
+    assert.equal(recovered.source, 'gemini');
+
+    // Persistent 503 hits retry cap (1 initial + 2 retries = 3 attempts) and falls back
+    let failingAttempts = 0;
+    const always503Client: GeminiContentClient = {
+      models: {
+        generateContent: async () => {
+          failingAttempts++;
+          throw makeApiError(503, 'Service Unavailable');
+        },
+      },
+    };
+    const fallbackPlan = await generateDailyPlan(profile, airData, {
+      client: always503Client,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(failingAttempts, 3);
+    assert.equal(fallbackPlan.source, 'fallback');
+    assert.equal(fallbackPlan.fallbackCode, 'upstream_error');
+    assert.equal(DailyPlanPayloadSchema.safeParse(fallbackPlan).success, true);
+  });
+
+  it('never exposes secrets from upstream Gemini errors in fallback responses', async () => {
+    const airData = buildDemoAirQualityData('moderate_haze');
+    const profile = {
+      ...DEMO_PERSONAS[2].profile,
+      location: airData.location,
+      onboardingCompleted: true,
+    };
+    const fakeSecret = ['AI', 'za', 'SySecretIntegrationTest', '9876543210'].join('');
+
+    const secretThrowingClient: GeminiContentClient = {
+      models: {
+        generateContent: async () => {
+          throw makeApiError(
+            401,
+            `Unauthorized x-goog-api-key: ${fakeSecret} url=https://generativelanguage.googleapis.com?key=${fakeSecret}`,
+          );
+        },
+      },
+    };
+
+    const plan = await generateDailyPlan(profile, airData, {
+      client: secretThrowingClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(plan.source, 'fallback');
+    assert.equal(plan.fallbackCode, 'invalid_credentials');
+    assert.ok(!JSON.stringify(plan).includes(fakeSecret));
+
+    const ask = await askSaansAssistant('Commute advice?', [], profile, airData, {
+      client: secretThrowingClient,
+      retryOptions: noDelayRetry,
+    });
+    assert.equal(ask.source, 'fallback');
+    assert.equal(ask.fallbackCode, 'invalid_credentials');
+    assert.ok(!JSON.stringify(ask).includes(fakeSecret));
   });
 });

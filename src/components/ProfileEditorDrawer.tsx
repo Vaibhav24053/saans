@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Check, Sparkles, Users, X } from 'lucide-react';
 import { DEMO_PERSONAS } from '@shared/demoScenarios';
 import type {
   BudgetPreference,
   CommuteType,
   CookingFuel,
+  DemoPersonaId,
   HomeType,
   HouseholdProfile,
   OutdoorWindowPref,
@@ -24,19 +25,42 @@ export function ProfileEditorDrawer() {
     activePersonaId,
   } = useSaans();
 
-  const [draft, setDraft] = useState<HouseholdProfile>(profile);
-
-  useEffect(() => {
-    if (isProfileEditorOpen) {
-      setDraft(profile);
-    }
-  }, [isProfileEditorOpen, profile]);
-
   if (!isProfileEditorOpen) return null;
 
+  return (
+    <ProfileEditorDrawerContent
+      initialProfile={profile}
+      activePersonaId={activePersonaId}
+      onClose={() => setIsProfileEditorOpen(false)}
+      onSave={(next) => {
+        updateProfile(next);
+        setIsProfileEditorOpen(false);
+      }}
+      onApplyPersona={(id) => {
+        applyDemoPersona(id);
+        setIsProfileEditorOpen(false);
+      }}
+    />
+  );
+}
+
+function ProfileEditorDrawerContent({
+  initialProfile,
+  activePersonaId,
+  onClose,
+  onSave,
+  onApplyPersona,
+}: {
+  initialProfile: HouseholdProfile;
+  activePersonaId: DemoPersonaId | null;
+  onClose: () => void;
+  onSave: (next: HouseholdProfile) => void;
+  onApplyPersona: (id: DemoPersonaId) => void;
+}) {
+  const [draft, setDraft] = useState<HouseholdProfile>(initialProfile);
+
   const handleSave = () => {
-    updateProfile(draft);
-    setIsProfileEditorOpen(false);
+    onSave(draft);
   };
 
   return (
@@ -56,7 +80,7 @@ export function ProfileEditorDrawer() {
           </div>
           <button
             type="button"
-            onClick={() => setIsProfileEditorOpen(false)}
+            onClick={onClose}
             className="p-1.5 rounded-lg text-[#717D77] hover:bg-[#F0EEE7] cursor-pointer"
             aria-label="Close profile editor"
           >
@@ -82,10 +106,7 @@ export function ProfileEditorDrawer() {
                   <button
                     key={persona.id}
                     type="button"
-                    onClick={() => {
-                      applyDemoPersona(persona.id);
-                      setIsProfileEditorOpen(false);
-                    }}
+                    onClick={() => onApplyPersona(persona.id)}
                     className={`w-full text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${
                       isSelected
                         ? 'bg-[#1B4332] text-white border-[#1B4332]'
@@ -384,7 +405,7 @@ export function ProfileEditorDrawer() {
         <div className="px-5 py-4 border-t border-[#E6E3DA] flex items-center justify-end gap-2 bg-[#FAF9F6]">
           <button
             type="button"
-            onClick={() => setIsProfileEditorOpen(false)}
+            onClick={onClose}
             className="px-4 py-2 rounded-xl text-xs font-medium text-[#4A5550] hover:bg-[#ECE9DF] cursor-pointer"
           >
             Cancel

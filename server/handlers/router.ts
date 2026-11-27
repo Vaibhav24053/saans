@@ -31,6 +31,17 @@ class HttpError extends Error {
   }
 }
 
+type RouteHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  urlObj: URL,
+) => Promise<void>;
+
+interface RouteDefinition {
+  method: 'GET' | 'POST';
+  handler: RouteHandler;
+}
+
 function sendJson(
   res: ServerResponse,
   status: number,
@@ -46,16 +57,6 @@ function sendJson(
     }
   }
   res.end(JSON.stringify(payload));
-}
-
-function assertMethod(method: string, allowed: string): void {
-  if (method !== allowed) {
-    throw new HttpError(
-      405,
-      `Method ${method} is not allowed for this route. Use ${allowed}.`,
-      allowed,
-    );
-  }
 }
 
 function parseCoordinatePair(
@@ -112,6 +113,127 @@ function formatValidationIssue(
   return `Invalid request field "${field}": ${first.message}`;
 }
 
+async function handleHealth(
+  _req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  sendJson(res, 200, {
+    status: 'ok',
+    geminiConfigured: isGeminiConfigured(),
+    model: getConfiguredModel(),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+async function handleGeocode(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  urlObj: URL,
+): Promise<void> {
+  const q = urlObj.searchParams.get('q') ?? '';
+  const latStr = urlObj.searchParams.get('lat');
+  const lonStr = urlObj.searchParams.get('lon');
+
+  if (latStr !== null || lonStr !== null) {
+    const coords = parseCoordinatePair(latStr, lonStr);
+    if (!coords) {
+      sendJson(res, 400, {
+        error:
+          'Invalid coordinates. Provide valid numeric lat (-90 to 90) and lon (-180 to 180).',
+      });
+      return;
+    }
+    const location = await reverseGeocodeCoordinates(coords.lat, coords.lon);
+    sendJson(res, 200, { location });
+    return;
+  }
+
+  if (q.trim().length < 2) {
+    sendJson(res, 200, { results: [] });
+    return;
+  }
+  const results = await searchLocations(q);
+  sendJson(res, 200, { results });
+}
+
+async function handleAirQuality(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  urlObj: URL,
+): Promise<void> {
+  const coords = parseCoordinatePair(
+    urlObj.searchParams.get('lat'),
+    urlObj.searchParams.get('lon'),
+  );
+  if (!coords) {
+    sendJson(res, 400, {
+      error:
+        'Valid lat (-90 to 90) and lon (-180 to 180) query parameters are required.',
+    });
+    return;
+  }
+
+  const data = await fetchOpenMeteoAirQuality(coords.lat, coords.lon, {
+    name: urlObj.searchParams.get('name') ?? undefined,
+    admin1: urlObj.searchParams.get('admin1') ?? undefined,
+    country: urlObj.searchParams.get('country') ?? undefined,
+    timezone: urlObj.searchParams.get('timezone') ?? undefined,
+  });
+  sendJson(res, 200, data);
+}
+
+async function handleDailyPlan(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (!body.profile || !body.airData) {
+    sendJson(res, 400, { error: 'Both profile and airData are required.' });
+    return;
+  }
+  const parsed = DailyPlanRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: formatValidationIssue(parsed.error.issues) });
+    return;
+  }
+  const plan = await generateDailyPlan(parsed.data.profile, parsed.data.airData);
+  sendJson(res, 200, plan);
+}
+
+async function handleAsk(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const question = typeof body.question === 'string' ? body.question.trim() : '';
+  if (!question || !body.profile || !body.airData) {
+    sendJson(res, 400, {
+      error: 'question, profile, and airData are required.',
+    });
+    return;
+  }
+  const parsed = AskSaansRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: formatValidationIssue(parsed.error.issues) });
+    return;
+  }
+  const reply = await askSaansAssistant(
+    parsed.data.question,
+    parsed.data.history,
+    parsed.data.profile,
+    parsed.data.airData,
+  );
+  sendJson(res, 200, reply);
+}
+
+const ROUTE_TABLE: Record<string, RouteDefinition> = {
+  '/api/health': { method: 'GET', handler: handleHealth },
+  '/api/geocode': { method: 'GET', handler: handleGeocode },
+  '/api/air-quality': { method: 'GET', handler: handleAirQuality },
+  '/api/daily-plan': { method: 'POST', handler: handleDailyPlan },
+  '/api/ask': { method: 'POST', handler: handleAsk },
+};
+
 export async function handleNodeRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -121,121 +243,21 @@ export async function handleNodeRequest(
   const pathname = urlObj.pathname;
 
   try {
-    if (pathname === '/api/health') {
-      assertMethod(method, 'GET');
-      sendJson(res, 200, {
-        status: 'ok',
-        geminiConfigured: isGeminiConfigured(),
-        model: getConfiguredModel(),
-        timestamp: new Date().toISOString(),
-      });
+    const route = ROUTE_TABLE[pathname];
+    if (!route) {
+      sendJson(res, 404, { error: `API route not found: ${pathname}` });
       return;
     }
 
-    if (pathname === '/api/geocode') {
-      assertMethod(method, 'GET');
-      const q = urlObj.searchParams.get('q') ?? '';
-      const latStr = urlObj.searchParams.get('lat');
-      const lonStr = urlObj.searchParams.get('lon');
-
-      if (latStr !== null || lonStr !== null) {
-        const coords = parseCoordinatePair(latStr, lonStr);
-        if (!coords) {
-          sendJson(res, 400, {
-            error:
-              'Invalid coordinates. Provide valid numeric lat (-90 to 90) and lon (-180 to 180).',
-          });
-          return;
-        }
-        const location = await reverseGeocodeCoordinates(coords.lat, coords.lon);
-        sendJson(res, 200, { location });
-        return;
-      }
-
-      if (q.trim().length < 2) {
-        sendJson(res, 200, { results: [] });
-        return;
-      }
-      const results = await searchLocations(q);
-      sendJson(res, 200, { results });
-      return;
-    }
-
-    if (pathname === '/api/air-quality') {
-      assertMethod(method, 'GET');
-      const coords = parseCoordinatePair(
-        urlObj.searchParams.get('lat'),
-        urlObj.searchParams.get('lon'),
+    if (method !== route.method) {
+      throw new HttpError(
+        405,
+        `Method ${method} is not allowed for this route. Use ${route.method}.`,
+        route.method,
       );
-      if (!coords) {
-        sendJson(res, 400, {
-          error:
-            'Valid lat (-90 to 90) and lon (-180 to 180) query parameters are required.',
-        });
-        return;
-      }
-      const name = urlObj.searchParams.get('name') ?? undefined;
-      const admin1 = urlObj.searchParams.get('admin1') ?? undefined;
-      const country = urlObj.searchParams.get('country') ?? undefined;
-      const timezone = urlObj.searchParams.get('timezone') ?? undefined;
-
-      const data = await fetchOpenMeteoAirQuality(coords.lat, coords.lon, {
-        name,
-        admin1,
-        country,
-        timezone,
-      });
-      sendJson(res, 200, data);
-      return;
     }
 
-    if (pathname === '/api/daily-plan') {
-      assertMethod(method, 'POST');
-      const body = await readJsonBody(req);
-      if (!body.profile || !body.airData) {
-        sendJson(res, 400, { error: 'Both profile and airData are required.' });
-        return;
-      }
-      const parsed = DailyPlanRequestSchema.safeParse(body);
-      if (!parsed.success) {
-        sendJson(res, 400, {
-          error: formatValidationIssue(parsed.error.issues),
-        });
-        return;
-      }
-      const plan = await generateDailyPlan(parsed.data.profile, parsed.data.airData);
-      sendJson(res, 200, plan);
-      return;
-    }
-
-    if (pathname === '/api/ask') {
-      assertMethod(method, 'POST');
-      const body = await readJsonBody(req);
-      const question = typeof body.question === 'string' ? body.question.trim() : '';
-      if (!question || !body.profile || !body.airData) {
-        sendJson(res, 400, {
-          error: 'question, profile, and airData are required.',
-        });
-        return;
-      }
-      const parsed = AskSaansRequestSchema.safeParse(body);
-      if (!parsed.success) {
-        sendJson(res, 400, {
-          error: formatValidationIssue(parsed.error.issues),
-        });
-        return;
-      }
-      const reply = await askSaansAssistant(
-        parsed.data.question,
-        parsed.data.history,
-        parsed.data.profile,
-        parsed.data.airData,
-      );
-      sendJson(res, 200, reply);
-      return;
-    }
-
-    sendJson(res, 404, { error: `API route not found: ${pathname}` });
+    await route.handler(req, res, urlObj);
   } catch (error) {
     if (error instanceof HttpError) {
       sendJson(

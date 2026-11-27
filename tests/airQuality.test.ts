@@ -6,6 +6,7 @@ import {
   isInEuropeanCamsDomain,
   isValidCoordinates,
   reverseGeocodeCoordinates,
+  searchLocations,
   selectCamsModelDomain,
 } from '../server/lib/airQuality.ts';
 
@@ -293,5 +294,56 @@ describe('fetchOpenMeteoAirQuality deterministic parsing', () => {
     const loc = await reverseGeocodeCoordinates(-33.8688, -151.2093);
     assert.equal(loc.name, '33.87°S, 151.21°W');
     assert.equal(loc.source, 'geolocation');
+  });
+
+  it('serves cached air quality on repeat requests and merges updated location hints', async () => {
+    const tracker = mockFetchOnce(() =>
+      new Response(
+        JSON.stringify({
+          timezone: 'Asia/Kolkata',
+          current: { time: '2026-11-27T10:00', us_aqi: 140, pm2_5: 52.3 },
+          hourly: { time: ['2026-11-27T10:00'], us_aqi: [140], pm2_5: [52.3] },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const first = await fetchOpenMeteoAirQuality(28.6139, 77.209, {
+      name: 'New Delhi',
+      country: 'India',
+    });
+    const second = await fetchOpenMeteoAirQuality(28.6139, 77.209, {
+      name: 'Connaught Place',
+      country: 'India',
+    });
+
+    assert.equal(tracker.getUrls().length, 1);
+    assert.equal(first.location.name, 'New Delhi');
+    assert.equal(second.location.name, 'Connaught Place');
+    assert.equal(second.current.usAqi, 140);
+  });
+
+  it('throws descriptive errors on non-OK upstream responses and filters malformed geocode rows', async () => {
+    mockFetchOnce(() => new Response('Bad Gateway', { status: 502 }));
+    await assert.rejects(
+      () => fetchOpenMeteoAirQuality(28.6139, 77.209),
+      /HTTP 502/,
+    );
+
+    mockFetchOnce(() =>
+      new Response(
+        JSON.stringify({
+          results: [
+            { name: 'Pune', admin1: 'Maharashtra', country: 'India', latitude: 18.52, longitude: 73.85, timezone: 'Asia/Kolkata' },
+            { name: 'BrokenRow', latitude: 'invalid', longitude: 77 },
+            { name: 'OutOfRange', latitude: 95, longitude: 77 },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const locations = await searchLocations('Pune');
+    assert.equal(locations.length, 1);
+    assert.equal(locations[0].name, 'Pune');
   });
 });

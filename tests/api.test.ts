@@ -247,4 +247,17 @@ describe('API router validation and routing', () => {
     assert.match(res.bodyText, /\[REDACTED\]/);
     assert.equal(res.json.stack, undefined);
   });
+
+  it('rejects oversized POST payloads exceeding 512 KB with 413', async () => {
+    const oversizedBody = JSON.stringify({
+      question: 'x'.repeat(600 * 1024),
+    });
+    const res = await invokeRouter({
+      method: 'POST',
+      url: '/api/ask',
+      body: oversizedBody,
+    });
+    assert.equal(res.status, 413);
+    assert.match(String(res.json.error), /maximum allowed size/i);
+  });
 });

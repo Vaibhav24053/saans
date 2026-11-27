@@ -1,18 +1,18 @@
 import { useState } from 'react';
 import { Check, Sparkles, Users, X } from 'lucide-react';
 import { DEMO_PERSONAS } from '@shared/demoScenarios';
-import type {
-  BudgetPreference,
-  CommuteType,
-  CookingFuel,
-  DemoPersonaId,
-  HomeType,
-  HouseholdProfile,
-  OutdoorWindowPref,
-  RespiratorySensitivity,
-  SustainabilityFocus,
-  VentilationOption,
-} from '@shared/types';
+import type { DemoPersonaId, HouseholdProfile } from '@shared/types';
+import {
+  BUDGET_PREFERENCE_OPTIONS,
+  COMMUTE_OPTIONS,
+  COOKING_FUEL_OPTIONS,
+  HOME_TYPE_OPTIONS,
+  matchOptionValue,
+  OUTDOOR_WINDOW_OPTIONS,
+  SENSITIVITY_OPTIONS,
+  SUSTAINABILITY_FOCUS_OPTIONS,
+  VENTILATION_OPTIONS,
+} from '@/constants/profileOptions';
 import { useSaans } from '@/context/SaansContext';
 
 export function ProfileEditorDrawer() {
@@ -58,10 +58,6 @@ function ProfileEditorDrawerContent({
   onApplyPersona: (id: DemoPersonaId) => void;
 }) {
   const [draft, setDraft] = useState<HouseholdProfile>(initialProfile);
-
-  const handleSave = () => {
-    onSave(draft);
-  };
 
   return (
     <div
@@ -199,15 +195,20 @@ function ProfileEditorDrawerContent({
                 onChange={(e) =>
                   setDraft((p) => ({
                     ...p,
-                    respiratorySensitivity: e.target
-                      .value as RespiratorySensitivity,
+                    respiratorySensitivity: matchOptionValue(
+                      e.target.value,
+                      SENSITIVITY_OPTIONS,
+                      p.respiratorySensitivity,
+                    ),
                   }))
                 }
                 className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
               >
-                <option value="none">Standard urban precautions</option>
-                <option value="mild">Cautious on moderate/hazy days</option>
-                <option value="elevated">High precaution / indoor priority</option>
+                {SENSITIVITY_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.selectLabel}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -221,17 +222,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      commuteType: e.target.value as CommuteType,
+                      commuteType: matchOptionValue(
+                        e.target.value,
+                        COMMUTE_OPTIONS,
+                        p.commuteType,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="public_transport">Public Transport</option>
-                  <option value="car">Private Car</option>
-                  <option value="two_wheeler">Two-Wheeler</option>
-                  <option value="walking">Walking</option>
-                  <option value="cycling">Cycling</option>
-                  <option value="wfh">Work From Home</option>
+                  {COMMUTE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -263,16 +267,20 @@ function ProfileEditorDrawerContent({
                 onChange={(e) =>
                   setDraft((p) => ({
                     ...p,
-                    outdoorWindow: e.target.value as OutdoorWindowPref,
+                    outdoorWindow: matchOptionValue(
+                      e.target.value,
+                      OUTDOOR_WINDOW_OPTIONS,
+                      p.outdoorWindow,
+                    ),
                   }))
                 }
                 className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
               >
-                <option value="early_morning">Early Morning (6–9 AM)</option>
-                <option value="mid_morning">Mid-Morning (9–12 PM)</option>
-                <option value="afternoon">Afternoon (12–4 PM)</option>
-                <option value="evening">Evening (5–8 PM)</option>
-                <option value="flexible">Flexible</option>
+                {OUTDOOR_WINDOW_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.drawerLabel}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -286,14 +294,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      homeType: e.target.value as HomeType,
+                      homeType: matchOptionValue(
+                        e.target.value,
+                        HOME_TYPE_OPTIONS,
+                        p.homeType,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="apartment">Apartment</option>
-                  <option value="independent_house">Independent House</option>
-                  <option value="other">Other</option>
+                  {HOME_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -326,15 +340,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      ventilationOption: e.target.value as VentilationOption,
+                      ventilationOption: matchOptionValue(
+                        e.target.value,
+                        VENTILATION_OPTIONS,
+                        p.ventilationOption,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="cross_ventilation">Cross-ventilation</option>
-                  <option value="exhaust_fan">Exhaust fan</option>
-                  <option value="ac_recirculate">AC recirculate</option>
-                  <option value="limited">Limited windows</option>
+                  {VENTILATION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -346,14 +365,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      cookingFuel: e.target.value as CookingFuel,
+                      cookingFuel: matchOptionValue(
+                        e.target.value,
+                        COOKING_FUEL_OPTIONS,
+                        p.cookingFuel,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="lpg_gas">LPG / Piped Gas</option>
-                  <option value="induction_electric">Induction / Electric</option>
-                  <option value="mixed">Mixed</option>
+                  {COOKING_FUEL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -368,15 +393,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      sustainabilityFocus: e.target
-                        .value as SustainabilityFocus,
+                      sustainabilityFocus: matchOptionValue(
+                        e.target.value,
+                        SUSTAINABILITY_FOCUS_OPTIONS,
+                        p.sustainabilityFocus,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="balanced">Balanced</option>
-                  <option value="exposure_first">Exposure first</option>
-                  <option value="low_emission_priority">Low emissions</option>
+                  {SUSTAINABILITY_FOCUS_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -388,14 +418,20 @@ function ProfileEditorDrawerContent({
                   onChange={(e) =>
                     setDraft((p) => ({
                       ...p,
-                      budgetPreference: e.target.value as BudgetPreference,
+                      budgetPreference: matchOptionValue(
+                        e.target.value,
+                        BUDGET_PREFERENCE_OPTIONS,
+                        p.budgetPreference,
+                      ),
                     }))
                   }
                   className="w-full px-3 py-2 text-xs rounded-xl border border-[#D4D0C4] bg-[#FAF9F6]"
                 >
-                  <option value="zero_cost">Zero-cost steps</option>
-                  <option value="moderate">Moderate</option>
-                  <option value="flexible">Flexible</option>
+                  {BUDGET_PREFERENCE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.drawerLabel}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -412,7 +448,7 @@ function ProfileEditorDrawerContent({
           </button>
           <button
             type="button"
-            onClick={handleSave}
+            onClick={() => onSave(draft)}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#1B4332] text-white hover:bg-[#143326] cursor-pointer"
           >
             <Check className="w-3.5 h-3.5" />

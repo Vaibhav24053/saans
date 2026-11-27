@@ -10,6 +10,37 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+type CamsModelDomain = 'cams_europe' | 'cams_global';
+
+interface CamsDomainMetadata {
+  modelName: string;
+  spatialResolutionLabel: string;
+  dataSourceLabel: string;
+  attribution: string;
+  dataIntegrityNote: string;
+}
+
+const CAMS_DOMAIN_METADATA: Record<CamsModelDomain, CamsDomainMetadata> = {
+  cams_europe: {
+    modelName: 'Copernicus CAMS European Air Quality Forecast',
+    spatialResolutionLabel: '0.1° (~11 km European model grid)',
+    dataSourceLabel: 'Open-Meteo · Copernicus CAMS Europe (~11 km model)',
+    attribution:
+      'Air quality data provided by Open-Meteo.com using the Copernicus Atmosphere Monitoring Service (CAMS) European ensemble (CC BY 4.0).',
+    dataIntegrityNote:
+      'Modelled atmospheric forecast from Copernicus CAMS Europe (~11 km grid resolution) via Open-Meteo on US EPA AQI (0–500) and European AQI scales. Modelled forecasts reflect regional averages and are not street-level or official local monitoring station readings.',
+  },
+  cams_global: {
+    modelName: 'Copernicus CAMS Global Atmospheric Composition Forecast',
+    spatialResolutionLabel: '0.4° (~45 km global model grid)',
+    dataSourceLabel: 'Open-Meteo · Copernicus CAMS Global (~45 km model)',
+    attribution:
+      'Air quality data provided by Open-Meteo.com using the Copernicus Atmosphere Monitoring Service (CAMS) Global forecast (CC BY 4.0).',
+    dataIntegrityNote:
+      'Modelled atmospheric forecast from Copernicus CAMS Global (~45 km spatial resolution) via Open-Meteo on US EPA AQI (0–500) and European AQI scales. Model grids represent broad regional estimates and are NOT official CPCB ground monitoring station measurements or street-level readings.',
+  },
+};
+
 const airCache = new Map<string, CacheEntry<AirQualityData>>();
 const geoCache = new Map<string, CacheEntry<LocationInfo[]>>();
 
@@ -36,6 +67,25 @@ function setBoundedCache<T>(
   cache.set(key, entry);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function readUnknownArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function safeNumber(val: unknown): number | null {
+  if (typeof val === 'number' && Number.isFinite(val) && val >= 0) {
+    return Math.round(val * 10) / 10;
+  }
+  return null;
+}
+
 export function isValidCoordinates(latitude: number, longitude: number): boolean {
   return (
     Number.isFinite(latitude) &&
@@ -55,17 +105,40 @@ export function assertValidCoordinates(latitude: number, longitude: number): voi
   }
 }
 
-function safeNumber(val: unknown): number | null {
-  if (typeof val === 'number' && Number.isFinite(val) && val >= 0) {
-    return Math.round(val * 10) / 10;
-  }
-  return null;
-}
-
 function formatCoordinateFallbackLabel(latitude: number, longitude: number): string {
   const latDir = latitude >= 0 ? 'N' : 'S';
   const lonDir = longitude >= 0 ? 'E' : 'W';
   return `${Math.abs(latitude).toFixed(2)}°${latDir}, ${Math.abs(longitude).toFixed(2)}°${lonDir}`;
+}
+
+function parseGeocodingResults(raw: unknown): LocationInfo[] {
+  if (!isRecord(raw) || !Array.isArray(raw.results)) return [];
+  const locations: LocationInfo[] = [];
+
+  for (const item of raw.results) {
+    if (!isRecord(item)) continue;
+    const name = readOptionalString(item.name);
+    const latitude = item.latitude;
+    const longitude = item.longitude;
+    if (
+      !name ||
+      typeof latitude !== 'number' ||
+      typeof longitude !== 'number' ||
+      !isValidCoordinates(latitude, longitude)
+    ) {
+      continue;
+    }
+    locations.push({
+      name,
+      admin1: readOptionalString(item.admin1),
+      country: readOptionalString(item.country) ?? 'Unknown',
+      latitude,
+      longitude,
+      timezone: readOptionalString(item.timezone) ?? 'auto',
+      source: 'geocoding',
+    });
+  }
+  return locations;
 }
 
 export async function searchLocations(query: string): Promise<LocationInfo[]> {
@@ -93,32 +166,39 @@ export async function searchLocations(query: string): Promise<LocationInfo[]> {
     throw new Error(`Open-Meteo Geocoding returned HTTP ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    results?: Array<{
-      name: string;
-      admin1?: string;
-      country?: string;
-      latitude: number;
-      longitude: number;
-      timezone?: string;
-    }>;
-  };
-
-  const results: LocationInfo[] = (data.results ?? []).map((item) => ({
-    name: item.name,
-    admin1: item.admin1,
-    country: item.country ?? 'Unknown',
-    latitude: item.latitude,
-    longitude: item.longitude,
-    timezone: item.timezone ?? 'auto',
-    source: 'geocoding',
-  }));
+  const raw: unknown = await response.json();
+  const results = parseGeocodingResults(raw);
 
   setBoundedCache(geoCache, cacheKey, {
     value: results,
     expiresAt: Date.now() + GEO_TTL_MS,
   });
   return results;
+}
+
+function parseNominatimAddress(
+  raw: unknown,
+  latitude: number,
+  longitude: number,
+): LocationInfo | null {
+  if (!isRecord(raw) || !isRecord(raw.address)) return null;
+  const addr = raw.address;
+  const city =
+    readOptionalString(addr.city) ??
+    readOptionalString(addr.town) ??
+    readOptionalString(addr.village) ??
+    readOptionalString(addr.state_district);
+  if (!city) return null;
+
+  return {
+    name: city,
+    admin1: readOptionalString(addr.state),
+    country: readOptionalString(addr.country) ?? 'Unknown',
+    latitude,
+    longitude,
+    timezone: 'auto',
+    source: 'geolocation',
+  };
 }
 
 export async function reverseGeocodeCoordinates(
@@ -142,30 +222,9 @@ export async function reverseGeocodeCoordinates(
     });
 
     if (response.ok) {
-      const json = (await response.json()) as {
-        address?: {
-          city?: string;
-          town?: string;
-          village?: string;
-          state_district?: string;
-          state?: string;
-          country?: string;
-        };
-      };
-      const addr = json.address;
-      const city =
-        addr?.city ?? addr?.town ?? addr?.village ?? addr?.state_district;
-      if (city) {
-        return {
-          name: city,
-          admin1: addr?.state,
-          country: addr?.country ?? 'Unknown',
-          latitude,
-          longitude,
-          timezone: 'auto',
-          source: 'geolocation',
-        };
-      }
+      const raw: unknown = await response.json();
+      const resolved = parseNominatimAddress(raw, latitude, longitude);
+      if (resolved) return resolved;
     }
   } catch {
     // Fall through gracefully to coordinate label
@@ -190,9 +249,127 @@ export function isInEuropeanCamsDomain(latitude: number, longitude: number): boo
 export function selectCamsModelDomain(
   latitude: number,
   longitude: number,
-): 'cams_europe' | 'cams_global' {
+): CamsModelDomain {
   assertValidCoordinates(latitude, longitude);
   return isInEuropeanCamsDomain(latitude, longitude) ? 'cams_europe' : 'cams_global';
+}
+
+function buildAirQualityRequestUrl(
+  latitude: number,
+  longitude: number,
+  modelDomain: CamsModelDomain,
+): string {
+  const url = new URL('https://air-quality-api.open-meteo.com/v1/air-quality');
+  url.searchParams.set('latitude', String(latitude));
+  url.searchParams.set('longitude', String(longitude));
+  url.searchParams.set(
+    'current',
+    'us_aqi,european_aqi,pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,ozone',
+  );
+  url.searchParams.set(
+    'hourly',
+    'us_aqi,european_aqi,pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi_pm2_5,us_aqi_pm10,us_aqi_nitrogen_dioxide,us_aqi_sulphur_dioxide,us_aqi_ozone',
+  );
+  url.searchParams.set('timezone', 'auto');
+  url.searchParams.set('domains', modelDomain);
+  url.searchParams.set('forecast_days', '2');
+  return url.toString();
+}
+
+function normalizeHourlySeries(hourlyObj: Record<string, unknown>): HourlyAirPoint[] {
+  const times = readUnknownArray(hourlyObj.time);
+  const usAqi = readUnknownArray(hourlyObj.us_aqi);
+  const europeanAqi = readUnknownArray(hourlyObj.european_aqi);
+  const pm25 = readUnknownArray(hourlyObj.pm2_5);
+  const pm10 = readUnknownArray(hourlyObj.pm10);
+  const no2 = readUnknownArray(hourlyObj.nitrogen_dioxide);
+  const so2 = readUnknownArray(hourlyObj.sulphur_dioxide);
+  const o3 = readUnknownArray(hourlyObj.ozone);
+  const usAqiPm25 = readUnknownArray(hourlyObj.us_aqi_pm2_5);
+  const usAqiPm10 = readUnknownArray(hourlyObj.us_aqi_pm10);
+  const usAqiNo2 = readUnknownArray(hourlyObj.us_aqi_nitrogen_dioxide);
+  const usAqiSo2 = readUnknownArray(hourlyObj.us_aqi_sulphur_dioxide);
+  const usAqiO3 = readUnknownArray(hourlyObj.us_aqi_ozone);
+
+  const points: HourlyAirPoint[] = [];
+  for (let idx = 0; idx < times.length; idx++) {
+    const time = times[idx];
+    if (typeof time !== 'string' || !time) continue;
+    points.push({
+      time,
+      usAqi: safeNumber(usAqi[idx]),
+      europeanAqi: safeNumber(europeanAqi[idx]),
+      pm25: safeNumber(pm25[idx]),
+      pm10: safeNumber(pm10[idx]),
+      no2: safeNumber(no2[idx]),
+      so2: safeNumber(so2[idx]),
+      o3: safeNumber(o3[idx]),
+      usAqiPm25: safeNumber(usAqiPm25[idx]),
+      usAqiPm10: safeNumber(usAqiPm10[idx]),
+      usAqiNo2: safeNumber(usAqiNo2[idx]),
+      usAqiSo2: safeNumber(usAqiSo2[idx]),
+      usAqiO3: safeNumber(usAqiO3[idx]),
+    });
+  }
+  return points;
+}
+
+function normalizeOpenMeteoResponse(
+  raw: unknown,
+  latitude: number,
+  longitude: number,
+  modelDomain: CamsModelDomain,
+  locationHint?: Partial<LocationInfo>,
+): AirQualityData {
+  const root = isRecord(raw) ? raw : {};
+  const currentObj = isRecord(root.current) ? root.current : {};
+  const hourlyObj = isRecord(root.hourly) ? root.hourly : {};
+
+  const hourly = normalizeHourlySeries(hourlyObj);
+  const current = {
+    usAqi: safeNumber(currentObj.us_aqi),
+    europeanAqi: safeNumber(currentObj.european_aqi),
+    pm25: safeNumber(currentObj.pm2_5),
+    pm10: safeNumber(currentObj.pm10),
+    no2: safeNumber(currentObj.nitrogen_dioxide),
+    so2: safeNumber(currentObj.sulphur_dioxide),
+    o3: safeNumber(currentObj.ozone),
+  };
+
+  const rawTimezone = readOptionalString(root.timezone);
+  const hintTimezone =
+    locationHint?.timezone && locationHint.timezone.trim() !== 'auto'
+      ? locationHint.timezone.trim()
+      : undefined;
+  const timezone = rawTimezone ?? hintTimezone ?? 'UTC';
+  const currentTimeLocal =
+    readOptionalString(currentObj.time) ??
+    hourly[0]?.time ??
+    new Date().toISOString().slice(0, 16);
+
+  const summary = computeAirQualitySummary(current, hourly, currentTimeLocal);
+  const location: LocationInfo = {
+    name: locationHint?.name ?? formatCoordinateFallbackLabel(latitude, longitude),
+    admin1: locationHint?.admin1,
+    country: locationHint?.country ?? '',
+    latitude,
+    longitude,
+    timezone,
+    source: locationHint?.source ?? 'geocoding',
+  };
+
+  return {
+    location,
+    fetchedAt: new Date().toISOString(),
+    currentTimeLocal,
+    timezone,
+    isDemo: false,
+    modelDomain,
+    ...CAMS_DOMAIN_METADATA[modelDomain],
+    current,
+    hourly,
+    summary,
+  };
 }
 
 export async function fetchOpenMeteoAirQuality(
@@ -219,22 +396,8 @@ export async function fetchOpenMeteoAirQuality(
     };
   }
 
-  const url = new URL('https://air-quality-api.open-meteo.com/v1/air-quality');
-  url.searchParams.set('latitude', String(latitude));
-  url.searchParams.set('longitude', String(longitude));
-  url.searchParams.set(
-    'current',
-    'us_aqi,european_aqi,pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,ozone',
-  );
-  url.searchParams.set(
-    'hourly',
-    'us_aqi,european_aqi,pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi_pm2_5,us_aqi_pm10,us_aqi_nitrogen_dioxide,us_aqi_sulphur_dioxide,us_aqi_ozone',
-  );
-  url.searchParams.set('timezone', 'auto');
-  url.searchParams.set('domains', modelDomain);
-  url.searchParams.set('forecast_days', '2');
-
-  const response = await fetch(url.toString(), {
+  const requestUrl = buildAirQualityRequestUrl(latitude, longitude, modelDomain);
+  const response = await fetch(requestUrl, {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(12000),
   });
@@ -243,119 +406,14 @@ export async function fetchOpenMeteoAirQuality(
     throw new Error(`Open-Meteo Air Quality API returned HTTP ${response.status}`);
   }
 
-  const raw = (await response.json()) as {
-    timezone?: string;
-    current?: {
-      time?: string;
-      us_aqi?: number;
-      european_aqi?: number;
-      pm2_5?: number;
-      pm10?: number;
-      nitrogen_dioxide?: number;
-      sulphur_dioxide?: number;
-      ozone?: number;
-    };
-    hourly?: {
-      time?: string[];
-      us_aqi?: Array<number | null>;
-      european_aqi?: Array<number | null>;
-      pm2_5?: Array<number | null>;
-      pm10?: Array<number | null>;
-      nitrogen_dioxide?: Array<number | null>;
-      sulphur_dioxide?: Array<number | null>;
-      ozone?: Array<number | null>;
-      us_aqi_pm2_5?: Array<number | null>;
-      us_aqi_pm10?: Array<number | null>;
-      us_aqi_nitrogen_dioxide?: Array<number | null>;
-      us_aqi_sulphur_dioxide?: Array<number | null>;
-      us_aqi_ozone?: Array<number | null>;
-    };
-  };
-
-  const times = raw.hourly?.time ?? [];
-  const hourly: HourlyAirPoint[] = times.map((time, idx) => ({
-    time,
-    usAqi: safeNumber(raw.hourly?.us_aqi?.[idx]),
-    europeanAqi: safeNumber(raw.hourly?.european_aqi?.[idx]),
-    pm25: safeNumber(raw.hourly?.pm2_5?.[idx]),
-    pm10: safeNumber(raw.hourly?.pm10?.[idx]),
-    no2: safeNumber(raw.hourly?.nitrogen_dioxide?.[idx]),
-    so2: safeNumber(raw.hourly?.sulphur_dioxide?.[idx]),
-    o3: safeNumber(raw.hourly?.ozone?.[idx]),
-    usAqiPm25: safeNumber(raw.hourly?.us_aqi_pm2_5?.[idx]),
-    usAqiPm10: safeNumber(raw.hourly?.us_aqi_pm10?.[idx]),
-    usAqiNo2: safeNumber(raw.hourly?.us_aqi_nitrogen_dioxide?.[idx]),
-    usAqiSo2: safeNumber(raw.hourly?.us_aqi_sulphur_dioxide?.[idx]),
-    usAqiO3: safeNumber(raw.hourly?.us_aqi_ozone?.[idx]),
-  }));
-
-  const current = {
-    usAqi: safeNumber(raw.current?.us_aqi),
-    europeanAqi: safeNumber(raw.current?.european_aqi),
-    pm25: safeNumber(raw.current?.pm2_5),
-    pm10: safeNumber(raw.current?.pm10),
-    no2: safeNumber(raw.current?.nitrogen_dioxide),
-    so2: safeNumber(raw.current?.sulphur_dioxide),
-    o3: safeNumber(raw.current?.ozone),
-  };
-
-  const hintTimezone =
-    locationHint?.timezone && locationHint.timezone.trim() !== 'auto'
-      ? locationHint.timezone.trim()
-      : '';
-  const timezone = raw.timezone?.trim() || hintTimezone || 'UTC';
-  const currentTimeLocal =
-    raw.current?.time ?? hourly[0]?.time ?? new Date().toISOString().slice(0, 16);
-
-  const summary = computeAirQualitySummary(current, hourly, currentTimeLocal);
-
-  const location: LocationInfo = {
-    name: locationHint?.name ?? formatCoordinateFallbackLabel(latitude, longitude),
-    admin1: locationHint?.admin1,
-    country: locationHint?.country ?? '',
+  const raw: unknown = await response.json();
+  const result = normalizeOpenMeteoResponse(
+    raw,
     latitude,
     longitude,
-    timezone,
-    source: locationHint?.source ?? 'geocoding',
-  };
-
-  const modelName =
-    modelDomain === 'cams_europe'
-      ? 'Copernicus CAMS European Air Quality Forecast'
-      : 'Copernicus CAMS Global Atmospheric Composition Forecast';
-  const spatialResolutionLabel =
-    modelDomain === 'cams_europe'
-      ? '0.1° (~11 km European model grid)'
-      : '0.4° (~45 km global model grid)';
-  const dataSourceLabel =
-    modelDomain === 'cams_europe'
-      ? 'Open-Meteo · Copernicus CAMS Europe (~11 km model)'
-      : 'Open-Meteo · Copernicus CAMS Global (~45 km model)';
-  const attribution =
-    modelDomain === 'cams_europe'
-      ? 'Air quality data provided by Open-Meteo.com using the Copernicus Atmosphere Monitoring Service (CAMS) European ensemble (CC BY 4.0).'
-      : 'Air quality data provided by Open-Meteo.com using the Copernicus Atmosphere Monitoring Service (CAMS) Global forecast (CC BY 4.0).';
-  const dataIntegrityNote =
-    modelDomain === 'cams_europe'
-      ? 'Modelled atmospheric forecast from Copernicus CAMS Europe (~11 km grid resolution) via Open-Meteo on US EPA AQI (0–500) and European AQI scales. Modelled forecasts reflect regional averages and are not street-level or official local monitoring station readings.'
-      : 'Modelled atmospheric forecast from Copernicus CAMS Global (~45 km spatial resolution) via Open-Meteo on US EPA AQI (0–500) and European AQI scales. Model grids represent broad regional estimates and are NOT official CPCB ground monitoring station measurements or street-level readings.';
-
-  const result: AirQualityData = {
-    location,
-    fetchedAt: new Date().toISOString(),
-    currentTimeLocal,
-    timezone,
-    isDemo: false,
     modelDomain,
-    modelName,
-    spatialResolutionLabel,
-    attribution,
-    dataSourceLabel,
-    dataIntegrityNote,
-    current,
-    hourly,
-    summary,
-  };
+    locationHint,
+  );
 
   setBoundedCache(airCache, cacheKey, {
     value: result,

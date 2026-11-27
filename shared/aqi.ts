@@ -17,6 +17,15 @@ export interface AqiCategory {
   summary: string;
 }
 
+export const US_AQI_THRESHOLDS = {
+  GOOD_MAX: 50,
+  MODERATE_MAX: 100,
+  ELEVATED: 101,
+  UNHEALTHY: 151,
+  VERY_UNHEALTHY: 201,
+  HAZARDOUS: 301,
+} as const;
+
 export function isValidAqiValue(aqi: number | null | undefined): aqi is number {
   return typeof aqi === 'number' && Number.isFinite(aqi) && aqi >= 0;
 }
@@ -305,6 +314,147 @@ export function detectDominantPollutant(
   return ratios[0].key;
 }
 
+function computeSixHourTrend(
+  currentUsAqi: number | null,
+  next6: HourlyAirPoint[],
+): Pick<AirQualitySummary, 'trendDirection' | 'trendDelta6h' | 'trendNote'> {
+  const validNext6Aqis = next6
+    .map((p) => p.usAqi)
+    .filter((v): v is number => isValidAqiValue(v));
+  const startAqi = isValidAqiValue(currentUsAqi)
+    ? currentUsAqi
+    : (validNext6Aqis[0] ?? null);
+  const end6Aqi =
+    validNext6Aqis.length > 0
+      ? validNext6Aqis[validNext6Aqis.length - 1]
+      : startAqi;
+  const trendDelta6h =
+    startAqi !== null && end6Aqi !== null ? Math.round(end6Aqi - startAqi) : 0;
+
+  if (trendDelta6h <= -15) {
+    return {
+      trendDirection: 'improving',
+      trendDelta6h,
+      trendNote: `Forecast suggests modelled US AQI easing by ~${Math.abs(trendDelta6h)} points over the next 6 hours.`,
+    };
+  }
+  if (trendDelta6h >= 15) {
+    return {
+      trendDirection: 'worsening',
+      trendDelta6h,
+      trendNote: `Forecast indicates modelled US AQI rising by ~${trendDelta6h} points over the next 6 hours.`,
+    };
+  }
+  return {
+    trendDirection: 'stable',
+    trendDelta6h,
+    trendNote:
+      startAqi === null || validNext6Aqis.length === 0
+        ? 'Hourly forecast trend is temporarily unavailable due to limited readings.'
+        : 'Modelled levels are expected to remain broadly steady over the next 6 hours.',
+  };
+}
+
+function buildThreeHourCandidate(slice: HourlyAirPoint[]): AirWindow | null {
+  const aqiVals = slice
+    .map((p) => p.usAqi)
+    .filter((v): v is number => isValidAqiValue(v));
+  if (aqiVals.length === 0) return null;
+
+  const pm25Vals = slice
+    .map((p) => p.pm25)
+    .filter((v): v is number => isValidAqiValue(v));
+  const avgUsAqi = Math.round(
+    aqiVals.reduce((sum, v) => sum + v, 0) / aqiVals.length,
+  );
+  const peakUsAqi = Math.round(Math.max(...aqiVals));
+  const avgPm25 =
+    pm25Vals.length > 0
+      ? Math.round(
+          (pm25Vals.reduce((sum, v) => sum + v, 0) / pm25Vals.length) * 10,
+        ) / 10
+      : 0;
+
+  return {
+    startTime: slice[0].time,
+    endTime: slice[slice.length - 1].time,
+    avgUsAqi,
+    peakUsAqi,
+    avgPm25,
+  };
+}
+
+function computeRollingWindows(
+  next24: HourlyAirPoint[],
+): Pick<AirQualitySummary, 'peakWindow' | 'lowerWindow'> {
+  let peakWindow: AirWindow | null = null;
+  let lowerWindow: AirWindow | null = null;
+
+  if (next24.length < 3) {
+    return { peakWindow, lowerWindow };
+  }
+
+  for (let i = 0; i <= next24.length - 3; i++) {
+    const slice = next24.slice(i, i + 3);
+    const candidate = buildThreeHourCandidate(slice);
+    if (!candidate) continue;
+
+    if (!peakWindow || candidate.avgUsAqi > peakWindow.avgUsAqi) {
+      peakWindow = candidate;
+    }
+
+    // Prefer daytime/waking hours (06:00–21:00) for actionable lower-pollution window
+    const startHour = parseInt(slice[0].time.slice(11, 13), 10);
+    if (startHour >= 6 && startHour <= 20) {
+      if (!lowerWindow || candidate.avgUsAqi < lowerWindow.avgUsAqi) {
+        lowerWindow = candidate;
+      }
+    }
+  }
+
+  return { peakWindow, lowerWindow };
+}
+
+function computeTomorrowOutlook(
+  hourly: HourlyAirPoint[],
+  currentTimeLocal: string,
+): AirQualitySummary['tomorrowOutlook'] {
+  const todayDate = currentTimeLocal.slice(0, 10);
+  const futureDates = hourly
+    .map((h) => h.time.slice(0, 10))
+    .filter((d) => d > todayDate)
+    .sort();
+  const tomorrowDate = futureDates[0] ?? null;
+  if (!tomorrowDate) return null;
+
+  const tomorrowPoints = hourly.filter((h) => h.time.slice(0, 10) === tomorrowDate);
+  if (tomorrowPoints.length < 6) return null;
+
+  const tVals = tomorrowPoints
+    .map((p) => p.usAqi)
+    .filter((v): v is number => isValidAqiValue(v));
+  if (tVals.length === 0) return null;
+
+  const todayVals = hourly
+    .filter((h) => h.time.slice(0, 10) === todayDate)
+    .map((p) => p.usAqi)
+    .filter((v): v is number => isValidAqiValue(v));
+
+  const avgUsAqi = Math.round(tVals.reduce((sum, v) => sum + v, 0) / tVals.length);
+  const maxUsAqi = Math.round(Math.max(...tVals));
+  const minUsAqi = Math.round(Math.min(...tVals));
+  const todayAvg =
+    todayVals.length > 0
+      ? todayVals.reduce((sum, v) => sum + v, 0) / todayVals.length
+      : avgUsAqi;
+
+  const diff = avgUsAqi - todayAvg;
+  const directionVsToday: 'better' | 'similar' | 'worse' =
+    diff <= -15 ? 'better' : diff >= 15 ? 'worse' : 'similar';
+
+  return { avgUsAqi, maxUsAqi, minUsAqi, directionVsToday };
+}
+
 export function computeAirQualitySummary(
   current: {
     usAqi: number | null;
@@ -318,137 +468,21 @@ export function computeAirQualitySummary(
   currentTimeLocal: string,
 ): AirQualitySummary {
   const nowIdx = findCurrentHourIndex(hourly, currentTimeLocal);
-
   const dominantPollutant = detectDominantPollutant(current, hourly[nowIdx]);
   const dominantPollutantLabel = `${POLLUTANT_META[dominantPollutant].symbol} (${POLLUTANT_META[dominantPollutant].name})`;
 
   const next24 = hourly.slice(nowIdx, nowIdx + 24);
   const next6 = hourly.slice(nowIdx, nowIdx + 7);
 
-  // 6-hour trend (computed only from valid finite AQI values)
-  const validNext6Aqis = next6
-    .map((p) => p.usAqi)
-    .filter((v): v is number => isValidAqiValue(v));
-  const startAqi = isValidAqiValue(current.usAqi)
-    ? current.usAqi
-    : (validNext6Aqis[0] ?? null);
-  const end6Aqi =
-    validNext6Aqis.length > 0
-      ? validNext6Aqis[validNext6Aqis.length - 1]
-      : startAqi;
-  const trendDelta6h =
-    startAqi !== null && end6Aqi !== null ? Math.round(end6Aqi - startAqi) : 0;
-
-  let trendDirection: 'improving' | 'stable' | 'worsening' = 'stable';
-  let trendNote =
-    startAqi === null || validNext6Aqis.length === 0
-      ? 'Hourly forecast trend is temporarily unavailable due to limited readings.'
-      : 'Modelled levels are expected to remain broadly steady over the next 6 hours.';
-  if (trendDelta6h <= -15) {
-    trendDirection = 'improving';
-    trendNote = `Forecast suggests modelled US AQI easing by ~${Math.abs(trendDelta6h)} points over the next 6 hours.`;
-  } else if (trendDelta6h >= 15) {
-    trendDirection = 'worsening';
-    trendNote = `Forecast indicates modelled US AQI rising by ~${trendDelta6h} points over the next 6 hours.`;
-  }
-
-  // Rolling 3-hour windows for upcoming peak & relatively lower window (within next 24h)
-  let peakWindow: AirWindow | null = null;
-  let lowerWindow: AirWindow | null = null;
-
-  if (next24.length >= 3) {
-    for (let i = 0; i <= next24.length - 3; i++) {
-      const slice = next24.slice(i, i + 3);
-      const aqiVals = slice
-        .map((p) => p.usAqi)
-        .filter((v): v is number => isValidAqiValue(v));
-      const pm25Vals = slice
-        .map((p) => p.pm25)
-        .filter((v): v is number => isValidAqiValue(v));
-      if (aqiVals.length === 0) continue;
-
-      const avgUsAqi = Math.round(
-        aqiVals.reduce((sum, v) => sum + v, 0) / aqiVals.length,
-      );
-      const peakUsAqi = Math.round(Math.max(...aqiVals));
-      const avgPm25 =
-        pm25Vals.length > 0
-          ? Math.round(
-              (pm25Vals.reduce((sum, v) => sum + v, 0) / pm25Vals.length) * 10,
-            ) / 10
-          : 0;
-
-      const candidate: AirWindow = {
-        startTime: slice[0].time,
-        endTime: slice[slice.length - 1].time,
-        avgUsAqi,
-        peakUsAqi,
-        avgPm25,
-      };
-
-      if (!peakWindow || candidate.avgUsAqi > peakWindow.avgUsAqi) {
-        peakWindow = candidate;
-      }
-
-      // Prefer daytime/waking hours (06:00–21:00) for actionable lower-pollution window
-      const startHour = parseInt(slice[0].time.slice(11, 13), 10);
-      const isDaytime = startHour >= 6 && startHour <= 20;
-      if (isDaytime) {
-        if (!lowerWindow || candidate.avgUsAqi < lowerWindow.avgUsAqi) {
-          lowerWindow = candidate;
-        }
-      }
-    }
-  }
-
-  // Tomorrow outlook (next calendar day after currentTimeLocal)
-  const todayDate = currentTimeLocal.slice(0, 10);
-  const futureDates = hourly
-    .map((h) => h.time.slice(0, 10))
-    .filter((d) => d > todayDate)
-    .sort();
-  const tomorrowDate = futureDates[0] ?? null;
-  const tomorrowPoints = tomorrowDate
-    ? hourly.filter((h) => h.time.slice(0, 10) === tomorrowDate)
-    : [];
-  const todayPoints = hourly.filter((h) => h.time.slice(0, 10) === todayDate);
-
-  let tomorrowOutlook: AirQualitySummary['tomorrowOutlook'] = null;
-  if (tomorrowPoints.length >= 6) {
-    const tVals = tomorrowPoints
-      .map((p) => p.usAqi)
-      .filter((v): v is number => isValidAqiValue(v));
-    const todayVals = todayPoints
-      .map((p) => p.usAqi)
-      .filter((v): v is number => isValidAqiValue(v));
-
-    if (tVals.length > 0) {
-      const avgUsAqi = Math.round(
-        tVals.reduce((sum, v) => sum + v, 0) / tVals.length,
-      );
-      const maxUsAqi = Math.round(Math.max(...tVals));
-      const minUsAqi = Math.round(Math.min(...tVals));
-      const todayAvg =
-        todayVals.length > 0
-          ? todayVals.reduce((sum, v) => sum + v, 0) / todayVals.length
-          : avgUsAqi;
-
-      const diff = avgUsAqi - todayAvg;
-      const directionVsToday: 'better' | 'similar' | 'worse' =
-        diff <= -15 ? 'better' : diff >= 15 ? 'worse' : 'similar';
-
-      tomorrowOutlook = { avgUsAqi, maxUsAqi, minUsAqi, directionVsToday };
-    }
-  }
+  const trend = computeSixHourTrend(current.usAqi, next6);
+  const windows = computeRollingWindows(next24);
+  const tomorrowOutlook = computeTomorrowOutlook(hourly, currentTimeLocal);
 
   return {
     dominantPollutant,
     dominantPollutantLabel,
-    trendDirection,
-    trendDelta6h,
-    trendNote,
-    peakWindow,
-    lowerWindow,
+    ...trend,
+    ...windows,
     tomorrowOutlook,
   };
 }

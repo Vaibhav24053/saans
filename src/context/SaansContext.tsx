@@ -28,6 +28,15 @@ import {
   requestDailyPlan,
   type HealthStatus,
 } from '@/services/api';
+import {
+  isAirCacheMatchingLocation,
+  parseStoredAirCache,
+  parseStoredDemoState,
+  parseStoredProfile,
+  readStorageJson,
+  writeStorageJson,
+  type StoredDemoState,
+} from '@/utils/storage';
 
 export type NavSection =
   | 'overview'
@@ -70,12 +79,6 @@ export const DEFAULT_PROFILE: HouseholdProfile = {
   budgetPreference: 'moderate',
   onboardingCompleted: false,
 };
-
-interface DemoState {
-  enabled: boolean;
-  scenarioId: DemoScenarioId;
-  personaId: DemoPersonaId | null;
-}
 
 interface SaansContextValue {
   profile: HouseholdProfile;
@@ -124,39 +127,24 @@ interface SaansContextValue {
 
 const SaansContext = createContext<SaansContextValue | null>(null);
 
+const DEFAULT_DEMO_STATE: StoredDemoState = {
+  enabled: false,
+  scenarioId: 'severe_winter_smog',
+  personaId: null,
+};
+
 function loadStoredProfile(): HouseholdProfile {
-  try {
-    const raw = localStorage.getItem(STORAGE_PROFILE_KEY);
-    if (!raw) return DEFAULT_PROFILE;
-    const parsed = JSON.parse(raw) as Partial<HouseholdProfile>;
-    return {
-      ...DEFAULT_PROFILE,
-      ...parsed,
-      location: {
-        ...DEFAULT_LOCATION,
-        ...(parsed.location ?? {}),
-      },
-    };
-  } catch {
-    return DEFAULT_PROFILE;
-  }
+  return readStorageJson(STORAGE_PROFILE_KEY, DEFAULT_PROFILE, (raw) =>
+    parseStoredProfile(raw, DEFAULT_PROFILE),
+  );
 }
 
-function loadStoredDemo(): DemoState {
-  try {
-    const raw = localStorage.getItem(STORAGE_DEMO_KEY);
-    if (!raw) {
-      return { enabled: false, scenarioId: 'severe_winter_smog', personaId: null };
-    }
-    const parsed = JSON.parse(raw) as Partial<DemoState>;
-    return {
-      enabled: Boolean(parsed.enabled),
-      scenarioId: parsed.scenarioId ?? 'severe_winter_smog',
-      personaId: parsed.personaId ?? null,
-    };
-  } catch {
-    return { enabled: false, scenarioId: 'severe_winter_smog', personaId: null };
-  }
+function loadStoredDemo(): StoredDemoState {
+  return readStorageJson(
+    STORAGE_DEMO_KEY,
+    DEFAULT_DEMO_STATE,
+    parseStoredDemoState,
+  );
 }
 
 function buildPlanFingerprint(
@@ -188,7 +176,7 @@ function buildPlanFingerprint(
 
 export function SaansProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<HouseholdProfile>(loadStoredProfile);
-  const [demoState, setDemoState] = useState<DemoState>(loadStoredDemo);
+  const [demoState, setDemoState] = useState<StoredDemoState>(loadStoredDemo);
   const [aqiScale, setAqiScaleState] = useState<AqiScale>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_SCALE_KEY);
@@ -223,19 +211,11 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
 
   // Persist profile, demo state, and scale
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_PROFILE_KEY, JSON.stringify(profile));
-    } catch {
-      // Ignore storage quota errors
-    }
+    writeStorageJson(STORAGE_PROFILE_KEY, profile);
   }, [profile]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_DEMO_KEY, JSON.stringify(demoState));
-    } catch {
-      // Ignore storage quota errors
-    }
+    writeStorageJson(STORAGE_DEMO_KEY, demoState);
   }, [demoState]);
 
   const setAqiScale = useCallback((scale: AqiScale) => {
@@ -287,11 +267,7 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
       const live = await fetchLiveAirQuality(profile.location);
       if (requestId !== airRequestIdRef.current) return;
       setAirData(live);
-      try {
-        localStorage.setItem(STORAGE_AIR_CACHE_KEY, JSON.stringify(live));
-      } catch {
-        // Ignore
-      }
+      writeStorageJson(STORAGE_AIR_CACHE_KEY, live);
     } catch (err) {
       if (requestId !== airRequestIdRef.current) return;
       const message =
@@ -300,16 +276,17 @@ export function SaansProvider({ children }: { children: React.ReactNode }) {
           : 'Unable to fetch air-quality forecast right now.';
       setAirError(message);
 
-      // Attempt offline cached snapshot for the same location
-      try {
-        const cachedRaw = localStorage.getItem(STORAGE_AIR_CACHE_KEY);
-        if (cachedRaw) {
-          const cached = JSON.parse(cachedRaw) as AirQualityData;
-          setAirData(cached);
-          setUsingCachedOfflineData(true);
-        }
-      } catch {
-        // Leave airData null so explicit error state shows
+      // Attempt offline cached snapshot only when it matches the active household location
+      const cached = readStorageJson<AirQualityData | null>(
+        STORAGE_AIR_CACHE_KEY,
+        null,
+        parseStoredAirCache,
+      );
+      if (cached && isAirCacheMatchingLocation(cached, profile.location)) {
+        setAirData(cached);
+        setUsingCachedOfflineData(true);
+      } else {
+        setAirData(null);
       }
     } finally {
       if (requestId === airRequestIdRef.current) {

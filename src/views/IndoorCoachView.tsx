@@ -9,37 +9,28 @@ import {
   Sparkles,
   Wind,
 } from 'lucide-react';
-import { formatTimeRange, getUsAqiCategory } from '@shared/aqi';
+import {
+  buildIndoorActions,
+  formatCookingFuelLabel,
+  getWindowGuidance,
+} from '@shared/indoorCoach';
 import { useSaans } from '@/context/SaansContext';
-
-interface IndoorAction {
-  id: string;
-  category: string;
-  title: string;
-  guidance: string;
-  costTag: 'Zero cost' | 'Uses your gear' | 'Low cost optional';
-  relevance: string;
-}
+import {
+  parseStoredStringArray,
+  readStorageJson,
+  writeStorageJson,
+} from '@/utils/storage';
 
 const STORAGE_INDOOR_KEY = 'saans_indoor_checks_v1';
 
 export function IndoorCoachView() {
   const { profile, airData, setIsProfileEditorOpen } = useSaans();
-  const [checkedIds, setCheckedIds] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_INDOOR_KEY);
-      return raw ? (JSON.parse(raw) as string[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [checkedIds, setCheckedIds] = useState<string[]>(() =>
+    readStorageJson(STORAGE_INDOOR_KEY, [], parseStoredStringArray),
+  );
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_INDOOR_KEY, JSON.stringify(checkedIds));
-    } catch {
-      // Ignore
-    }
+    writeStorageJson(STORAGE_INDOOR_KEY, checkedIds);
   }, [checkedIds]);
 
   const toggleItem = (id: string) => {
@@ -48,138 +39,8 @@ export function IndoorCoachView() {
     );
   };
 
-  const rawAqi = airData?.current.usAqi ?? null;
-  const aqiAvailable = rawAqi !== null;
-  const aqi = rawAqi ?? 0;
-  const cat = getUsAqiCategory(rawAqi);
-  const high = aqiAvailable && aqi >= 151;
-  const elevated = aqiAvailable && aqi >= 101;
-
-  const lowerWin = airData?.summary.lowerWindow
-    ? formatTimeRange(
-        airData.summary.lowerWindow.startTime,
-        airData.summary.lowerWindow.endTime,
-      )
-    : null;
-  const peakWin = airData?.summary.peakWindow
-    ? formatTimeRange(
-        airData.summary.peakWindow.startTime,
-        airData.summary.peakWindow.endTime,
-      )
-    : null;
-
-  const actions: IndoorAction[] = [
-    {
-      id: 'windows',
-      category: 'Windows & Ventilation Timing',
-      title: high
-        ? 'Keep outside-facing windows closed right now'
-        : 'Time your short indoor ventilation window',
-      guidance: high
-        ? `Outdoor modelled air is ${cat.label} (${aqi} US AQI). Keep street-facing and balcony windows shut${
-            peakWin ? `, especially through ${peakWin}` : ''
-          }. ${
-            lowerWin
-              ? `If indoor air feels stuffy, limit fresh-air exchange to a brief 10-minute refresh near ${lowerWin}.`
-              : 'Wait for an afternoon dip before briefly airing rooms.'
-          }`
-        : `Schedule a 15–20 minute ${
-            profile.ventilationOption === 'cross_ventilation'
-              ? 'cross-ventilation flush across opposite windows'
-              : 'window air refresh'
-          }${
-            lowerWin ? ` during the relatively lower ${lowerWin} window` : ''
-          }, then close windows ahead of evening traffic buildup.`,
-      costTag: 'Zero cost',
-      relevance: `Adapted to ${profile.homeType.replace('_', ' ')} + ${profile.ventilationOption.replace('_', ' ')}`,
-    },
-    {
-      id: 'cooking',
-      category: 'Cooking & Kitchen Air',
-      title:
-        profile.cookingFuel === 'induction_electric'
-          ? 'Control cooking oil aerosols with lids & exhaust'
-          : 'Vent out LPG/gas stove NO₂ and cooking smoke',
-      guidance:
-        profile.cookingFuel === 'induction_electric'
-          ? 'Electric and induction stoves avoid combustion NO₂, but high-heat tempering and frying still release fine PM2.5 aerosols. Cover pans with lids, run an exhaust fan if available, and shut bedroom doors while cooking.'
-          : 'Gas burners release indoor NO₂ and fine particulates quickly when windows are shut. Run your kitchen chimney/exhaust fan continuously from ignition until 10 minutes after cooking, use back burners, and keep the kitchen door closed.',
-      costTag: 'Zero cost',
-      relevance: `Tailored to ${
-        profile.cookingFuel === 'lpg_gas'
-          ? 'LPG / gas'
-          : profile.cookingFuel === 'induction_electric'
-            ? 'induction / electric'
-            : 'mixed'
-      } kitchen`,
-    },
-    {
-      id: 'smoke_sources',
-      category: 'Indoor Smoke & Fragrance',
-      title: 'Pause indoor combustion sources today',
-      guidance:
-        'Skip incense sticks (agarbatti), dhoop, scented candles, mosquito coils, and indoor smoking — in a closed room during smog episodes, a single burning stick can push indoor PM2.5 above outdoor levels.',
-      costTag: 'Zero cost',
-      relevance: 'High-impact indoor particulate prevention',
-    },
-    {
-      id: 'cleaning',
-      category: 'Cleaning & Settled Dust',
-      title: 'Damp-mop instead of dry broom sweeping',
-      guidance:
-        'Dry sweeping and feather dusting lift settled PM10 and fine ash back into breathing height. Use a damp cloth on windowsills and a wet mop on floors, and leave outdoor footwear near the entryway.',
-      costTag: 'Zero cost',
-      relevance:
-        profile.children > 0
-          ? 'Extra helpful where children play near floor level'
-          : 'Keeps coarse dust from resuspending indoors',
-    },
-    profile.hasAirPurifier
-      ? {
-          id: 'purifier',
-          category: 'HEPA Air Purifier Strategy',
-          title: 'Concentrate HEPA filtration in occupied rooms',
-          guidance: `Place your HEPA purifier centrally (at least 30 cm from walls) in the main family room during the day and move it to the bedroom 45 minutes before sleep. Keep doors and windows closed while running, and vacuum the washable pre-filter weekly during winter smog.`,
-          costTag: 'Uses your gear',
-          relevance: 'Using your existing HEPA purifier efficiently',
-        }
-      : {
-          id: 'no_purifier',
-          category: 'Protection Without an Air Purifier',
-          title: 'Create a low-draft “cleaner room” without buying hardware',
-          guidance:
-            profile.budgetPreference === 'zero_cost'
-              ? 'Designate one inner bedroom away from the main street as your cleaner-air room: block under-door gaps with a rolled cotton towel, keep its door closed during cooking, and damp-wipe surfaces daily.'
-              : 'Block window and door drafts with affordable foam weatherstripping tape and keep an inner bedroom closed during peak smog. If you ever consider a HEPA purifier later, size it to the room’s CADR rather than overspending on smart extras.',
-          costTag:
-            profile.budgetPreference === 'zero_cost'
-              ? 'Zero cost'
-              : 'Low cost optional',
-          relevance: 'Practical guidance without requiring an air purifier',
-        },
-    {
-      id: 'activities',
-      category: 'Indoor Family Routines',
-      title:
-        profile.children > 0
-          ? 'Keep children’s active play engaging indoors'
-          : 'Shift brisk movement indoors on elevated-AQI hours',
-      guidance:
-        profile.children > 0
-          ? elevated
-            ? 'Swap evening park runs for indoor obstacle courses, dance sessions, or stretching games while outdoor PM2.5 is elevated — keeping kids active without heavy smog inhalation.'
-            : 'Keep a quick indoor play backup ready if evening visibility or haze worsens.'
-          : elevated
-            ? 'Move cardio, yoga, or strength training indoors today; indoor breathing air generally carries less coarse dust and traffic exhaust than roadside air.'
-            : 'Use indoor mobility sessions during rush hours and reserve outdoor walks for quieter lower-AQI windows.',
-      costTag: 'Zero cost',
-      relevance:
-        profile.children > 0
-          ? `Tailored for ${profile.children} child${profile.children > 1 ? 'ren' : ''}`
-          : 'Adapted to household activity profile',
-    },
-  ];
-
+  const windowGuide = getWindowGuidance(airData);
+  const actions = buildIndoorActions(profile, airData);
   const completedCount = actions.filter((a) => checkedIds.includes(a.id)).length;
   const pct = Math.round((completedCount / actions.length) * 100);
 
@@ -196,13 +57,7 @@ export function IndoorCoachView() {
           <p className="text-sm text-[#4A5550] mt-1 max-w-2xl">
             Practical, affordable indoor guidance matched to your{' '}
             <strong>{profile.homeType.replace('_', ' ')}</strong>,{' '}
-            <strong>
-              {profile.cookingFuel === 'lpg_gas'
-                ? 'LPG / gas'
-                : profile.cookingFuel === 'induction_electric'
-                  ? 'induction / electric'
-                  : 'mixed'}
-            </strong>{' '}
+            <strong>{formatCookingFuelLabel(profile.cookingFuel)}</strong>{' '}
             kitchen, and{' '}
             <strong>
               {profile.hasAirPurifier ? 'HEPA purifier setup' : 'no-purifier setup'}
@@ -225,36 +80,42 @@ export function IndoorCoachView() {
         <div className="lg:col-span-2 saans-card p-5 flex items-start gap-4">
           <div
             className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${
-              high
+              windowGuide.isHigh
                 ? 'bg-[#FDECEC] text-[#991B1B]'
                 : 'bg-[#E6F0EB] text-[#1B4332]'
             }`}
           >
-            {high ? <DoorClosed className="w-5 h-5" /> : <Wind className="w-5 h-5" />}
+            {windowGuide.isHigh ? (
+              <DoorClosed className="w-5 h-5" />
+            ) : (
+              <Wind className="w-5 h-5" />
+            )}
           </div>
           <div>
             <div className="text-xs font-bold uppercase tracking-wider text-[#717D77]">
               Current Window Guidance · {airData?.location.name}
             </div>
             <h2 className="text-lg font-semibold text-[#151B18] mt-0.5">
-              {high
-                ? 'Keep exterior windows closed right now'
-                : elevated
-                  ? 'Keep street-facing windows shut; ventilate briefly in the lower window'
-                  : 'Good window for a brief 15-minute indoor air refresh'}
+              {windowGuide.headline}
             </h2>
             <p className="text-xs text-[#4A5550] mt-1 leading-relaxed">
-              {aqiAvailable ? (
+              {windowGuide.aqiAvailable ? (
                 <>
-                  Modelled outdoor US AQI is <strong>{rawAqi}</strong> ({cat.label}).{' '}
+                  Modelled outdoor US AQI is <strong>{windowGuide.rawAqi}</strong> (
+                  {windowGuide.categoryLabel}).{' '}
                 </>
               ) : (
-                <>Live outdoor AQI is currently unavailable — apply precautionary window habits. </>
+                <>
+                  Live outdoor AQI is currently unavailable — apply precautionary
+                  window habits.{' '}
+                </>
               )}
-              {lowerWin
-                ? `Relatively lower forecast window: ${lowerWin}.`
+              {windowGuide.lowerWindowLabel
+                ? `Relatively lower forecast window: ${windowGuide.lowerWindowLabel}.`
                 : ''}{' '}
-              {peakWin ? `Upcoming peak window: ${peakWin}.` : ''}
+              {windowGuide.peakWindowLabel
+                ? `Upcoming peak window: ${windowGuide.peakWindowLabel}.`
+                : ''}
             </p>
           </div>
         </div>

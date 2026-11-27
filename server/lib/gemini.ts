@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import type { z } from 'zod';
 import {
   findCurrentHourIndex,
   formatTimeRange,
@@ -29,6 +30,14 @@ export interface GeminiContentClient {
   };
 }
 
+export interface RetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  attemptTimeoutMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export interface GeminiCallOptions {
   client?: GeminiContentClient;
   retryOptions?: RetryOptions;
@@ -41,7 +50,9 @@ export function getConfiguredModel(): string {
 }
 
 export function isGeminiConfigured(): boolean {
-  return Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0);
+  return Boolean(
+    process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0,
+  );
 }
 
 function getAiClient(): GoogleGenAI | null {
@@ -65,7 +76,12 @@ export function sanitizeErrorText(text: string): string {
 }
 
 function parseHttpStatus(value: unknown): number | undefined {
-  const num = typeof value === 'number' ? value : typeof value === 'string' && /^\d{3}$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  let num = NaN;
+  if (typeof value === 'number') {
+    num = value;
+  } else if (typeof value === 'string' && /^\d{3}$/.test(value.trim())) {
+    num = Number(value.trim());
+  }
   return Number.isInteger(num) && num >= 100 && num <= 599 ? num : undefined;
 }
 
@@ -78,32 +94,121 @@ function extractHttpStatus(error: unknown, rawMessage: string): number | undefin
       response?: { status?: unknown };
       cause?: { status?: unknown; code?: unknown };
     };
-    const direct =
-      parseHttpStatus(errObj.status) ??
-      parseHttpStatus(errObj.statusCode) ??
-      parseHttpStatus(errObj.code) ??
-      parseHttpStatus(errObj.response?.status) ??
-      parseHttpStatus(errObj.cause?.status) ??
-      parseHttpStatus(errObj.cause?.code);
-    if (direct !== undefined) return direct;
+    const candidates = [
+      errObj.status,
+      errObj.statusCode,
+      errObj.code,
+      errObj.response?.status,
+      errObj.cause?.status,
+      errObj.cause?.code,
+    ];
+    for (const candidate of candidates) {
+      const parsed = parseHttpStatus(candidate);
+      if (parsed !== undefined) return parsed;
+    }
   }
 
-  const jsonCodeMatch = rawMessage.match(/"code"\s*:\s*(\d{3})\b/);
-  if (jsonCodeMatch) {
-    const parsed = parseHttpStatus(jsonCodeMatch[1]);
-    if (parsed !== undefined) return parsed;
-  }
-
-  const httpStatusMatch = rawMessage.match(
+  const patterns = [
+    /"code"\s*:\s*(\d{3})\b/,
     /\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(\d{3})\b/i,
-  );
-  if (httpStatusMatch) {
-    const parsed = parseHttpStatus(httpStatusMatch[1]);
-    if (parsed !== undefined) return parsed;
+  ];
+  for (const pattern of patterns) {
+    const match = rawMessage.match(pattern);
+    if (match) {
+      const parsed = parseHttpStatus(match[1]);
+      if (parsed !== undefined) return parsed;
+    }
   }
 
   return undefined;
 }
+
+interface ErrorClassificationRule {
+  code: FallbackCode;
+  statuses?: readonly number[];
+  keywords?: readonly string[];
+  matchError?: (error: unknown) => boolean;
+  buildMessage: (model: string) => string;
+}
+
+// Ordered strictly by precedence: transient upstream failures (502/503/504) must never be misclassified as model_unavailable
+const ERROR_CLASSIFICATION_RULES: readonly ErrorClassificationRule[] = [
+  {
+    code: 'upstream_error',
+    statuses: [502, 503, 504],
+    keywords: [
+      'bad gateway',
+      'service unavailable',
+      'gateway timeout',
+      '"status":"unavailable"',
+      '"status": "unavailable"',
+      'high demand',
+      'overloaded',
+      'temporarily unavailable',
+      'econnreset',
+      'econnrefused',
+      'enotfound',
+      'etimedout',
+      'fetch failed',
+    ],
+    buildMessage: () =>
+      'Gemini API is temporarily unavailable. Showing SAANS personalised rules-based fallback.',
+  },
+  {
+    code: 'rate_limited',
+    statuses: [429],
+    keywords: ['resource_exhausted', 'rate limit', 'too many requests', 'quota'],
+    buildMessage: () =>
+      'Gemini API rate limit or quota reached. Showing SAANS personalised rules-based fallback.',
+  },
+  {
+    code: 'invalid_credentials',
+    statuses: [401, 403],
+    keywords: [
+      'api_key_invalid',
+      'api key not valid',
+      'permission_denied',
+      'unauthenticated',
+      'unauthorized',
+      'forbidden',
+      'invalid api key',
+    ],
+    buildMessage: () =>
+      'Gemini API authentication or permission error. Check GEMINI_API_KEY and API permissions in the server .env file. Showing SAANS rules-based fallback.',
+  },
+  {
+    code: 'model_unavailable',
+    statuses: [404],
+    keywords: [
+      'not_found',
+      'is not found',
+      'model not found',
+      'no longer available',
+    ],
+    buildMessage: (model) =>
+      `Configured Gemini model (${model}) is unavailable for this API endpoint or key. Showing SAANS rules-based fallback.`,
+  },
+  {
+    code: 'timeout',
+    statuses: [408],
+    keywords: ['timed out', 'timeout', 'aborterror'],
+    buildMessage: () =>
+      'Gemini API request timed out. Showing SAANS personalised rules-based fallback.',
+  },
+  {
+    code: 'validation_failed',
+    keywords: [
+      'validation failed',
+      'unexpected token',
+      'invalid json',
+      'empty response',
+      'empty answer',
+    ],
+    matchError: (error) => error instanceof SyntaxError,
+    buildMessage: () =>
+      'Gemini output did not pass structured schema validation. Showing SAANS validated rules-based fallback.',
+  },
+];
 
 export function classifyGeminiError(
   error: unknown,
@@ -113,108 +218,14 @@ export function classifyGeminiError(
   const lower = rawMessage.toLowerCase();
   const status = extractHttpStatus(error, rawMessage);
 
-  // 1. Transient upstream gateway/availability failures (502/503/504) must NOT be misclassified as model_unavailable
-  if (
-    status === 502 ||
-    status === 503 ||
-    status === 504 ||
-    lower.includes('bad gateway') ||
-    lower.includes('service unavailable') ||
-    lower.includes('gateway timeout') ||
-    lower.includes('"status":"unavailable"') ||
-    lower.includes('"status": "unavailable"') ||
-    lower.includes('high demand') ||
-    lower.includes('overloaded') ||
-    lower.includes('temporarily unavailable') ||
-    lower.includes('econnreset') ||
-    lower.includes('econnrefused') ||
-    lower.includes('enotfound') ||
-    lower.includes('etimedout') ||
-    lower.includes('fetch failed')
-  ) {
-    return {
-      code: 'upstream_error',
-      userMessage:
-        'Gemini API is temporarily unavailable. Showing SAANS personalised rules-based fallback.',
-    };
-  }
-
-  // 2. Rate limits / quota exhaustion (429)
-  if (
-    status === 429 ||
-    lower.includes('resource_exhausted') ||
-    lower.includes('rate limit') ||
-    lower.includes('too many requests') ||
-    lower.includes('quota')
-  ) {
-    return {
-      code: 'rate_limited',
-      userMessage:
-        'Gemini API rate limit or quota reached. Showing SAANS personalised rules-based fallback.',
-    };
-  }
-
-  // 3. Authentication or permission failures (401 / 403)
-  if (
-    status === 401 ||
-    status === 403 ||
-    lower.includes('api_key_invalid') ||
-    lower.includes('api key not valid') ||
-    lower.includes('permission_denied') ||
-    lower.includes('unauthenticated') ||
-    lower.includes('unauthorized') ||
-    lower.includes('forbidden') ||
-    lower.includes('invalid api key')
-  ) {
-    return {
-      code: 'invalid_credentials',
-      userMessage:
-        'Gemini API authentication or permission error. Check GEMINI_API_KEY and API permissions in the server .env file. Showing SAANS rules-based fallback.',
-    };
-  }
-
-  // 4. Missing / unsupported model (404)
-  if (
-    status === 404 ||
-    lower.includes('not_found') ||
-    lower.includes('is not found') ||
-    lower.includes('model not found') ||
-    lower.includes('no longer available')
-  ) {
-    return {
-      code: 'model_unavailable',
-      userMessage: `Configured Gemini model (${model}) is unavailable for this API endpoint or key. Showing SAANS rules-based fallback.`,
-    };
-  }
-
-  // 5. Client-side / request timeouts
-  if (
-    status === 408 ||
-    lower.includes('timed out') ||
-    lower.includes('timeout') ||
-    lower.includes('aborterror')
-  ) {
-    return {
-      code: 'timeout',
-      userMessage:
-        'Gemini API request timed out. Showing SAANS personalised rules-based fallback.',
-    };
-  }
-
-  // 6. Structured JSON / schema validation failures
-  if (
-    error instanceof SyntaxError ||
-    lower.includes('validation failed') ||
-    lower.includes('unexpected token') ||
-    lower.includes('invalid json') ||
-    lower.includes('empty response') ||
-    lower.includes('empty answer')
-  ) {
-    return {
-      code: 'validation_failed',
-      userMessage:
-        'Gemini output did not pass structured schema validation. Showing SAANS validated rules-based fallback.',
-    };
+  for (const rule of ERROR_CLASSIFICATION_RULES) {
+    const statusMatch =
+      status !== undefined && Boolean(rule.statuses?.includes(status));
+    const keywordMatch = Boolean(rule.keywords?.some((kw) => lower.includes(kw)));
+    const customMatch = Boolean(rule.matchError?.(error));
+    if (statusMatch || keywordMatch || customMatch) {
+      return { code: rule.code, userMessage: rule.buildMessage(model) };
+    }
   }
 
   return {
@@ -229,18 +240,25 @@ export function isRetryableGeminiError(error: unknown, model: string): boolean {
   return code === 'upstream_error' || code === 'timeout';
 }
 
-export interface RetryOptions {
-  maxRetries?: number;
-  baseDelayMs?: number;
-  maxDelayMs?: number;
-  attemptTimeoutMs?: number;
-  sleep?: (ms: number) => Promise<void>;
-}
-
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Gemini request timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export async function executeGeminiWithRetry<T>(
   operation: () => Promise<T>,
@@ -259,8 +277,7 @@ export async function executeGeminiWithRetry<T>(
       return await withTimeout(operation(), attemptTimeoutMs);
     } catch (error) {
       lastError = error;
-      const retryable = isRetryableGeminiError(error, model);
-      if (!retryable || attempt >= maxRetries) {
+      if (!isRetryableGeminiError(error, model) || attempt >= maxRetries) {
         throw error;
       }
       const delayMs = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt));
@@ -438,18 +455,65 @@ const askResponseSchema = {
   ],
 };
 
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`Gemini request timed out after ${ms}ms`)),
-      ms,
-    );
-  });
+async function invokeStructuredGemini<TPayload, TResponse>(params: {
+  prompt: string;
+  temperature: number;
+  responseSchema: Record<string, unknown>;
+  zodSchema: z.ZodType<TPayload>;
+  emptyErrorMessage: string;
+  validationErrorPrefix: string;
+  missingKeyMessage: (model: string) => string;
+  defaultTimeoutMs: number;
+  options: GeminiCallOptions;
+  onSuccess: (payload: TPayload, model: string) => TResponse;
+  onFallback: (reason: string, code: FallbackCode) => TResponse;
+}): Promise<TResponse> {
+  const model = getConfiguredModel();
+  const ai: GeminiContentClient | null = params.options.client ?? getAiClient();
+  if (!ai) {
+    return params.onFallback(params.missingKeyMessage(model), 'missing_key');
+  }
+
   try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
+    const response = await executeGeminiWithRetry(
+      () =>
+        ai.models.generateContent({
+          model,
+          contents: params.prompt,
+          config: {
+            systemInstruction: SYSTEM_GUARDRAILS,
+            temperature: params.temperature,
+            responseMimeType: 'application/json',
+            responseSchema: params.responseSchema,
+          },
+        }),
+      model,
+      {
+        maxRetries: 2,
+        baseDelayMs: 500,
+        maxDelayMs: 2000,
+        attemptTimeoutMs: params.defaultTimeoutMs,
+        ...params.options.retryOptions,
+      },
+    );
+
+    const text = response.text;
+    if (!text) {
+      throw new Error(params.emptyErrorMessage);
+    }
+
+    const parsed: unknown = JSON.parse(text);
+    const validated = params.zodSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw new Error(
+        `${params.validationErrorPrefix}: ${validated.error.issues[0]?.message ?? 'invalid schema'}`,
+      );
+    }
+
+    return params.onSuccess(validated.data, model);
+  } catch (error) {
+    const classified = classifyGeminiError(error, model);
+    return params.onFallback(classified.userMessage, classified.code);
   }
 }
 
@@ -458,17 +522,6 @@ export async function generateDailyPlan(
   air: AirQualityData,
   options: GeminiCallOptions = {},
 ): Promise<DailyPlanResponse> {
-  const model = getConfiguredModel();
-  const ai: GeminiContentClient | null = options.client ?? getAiClient();
-  if (!ai) {
-    return generateFallbackDailyPlan(
-      profile,
-      air,
-      `GEMINI_API_KEY is not configured on the server. Showing SAANS personalised rules-based plan (configure GEMINI_API_KEY for ${model}).`,
-      'missing_key',
-    );
-  }
-
   const context = buildCompactContext(profile, air);
   const prompt = `Generate a personalised Daily Air Action Plan in strict JSON for this household and environmental snapshot.
 
@@ -481,57 +534,26 @@ REQUIREMENTS:
 SUPPLIED CONTEXT JSON:
 ${JSON.stringify(context, null, 2)}`;
 
-  try {
-    const response = await executeGeminiWithRetry(
-      () =>
-        ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction: SYSTEM_GUARDRAILS,
-            temperature: 0.35,
-            responseMimeType: 'application/json',
-            responseSchema: dailyPlanResponseSchema,
-          },
-        }),
-      model,
-      {
-        maxRetries: 2,
-        baseDelayMs: 500,
-        maxDelayMs: 2000,
-        attemptTimeoutMs: 20000,
-        ...options.retryOptions,
-      },
-    );
-
-    const text = response.text;
-    if (!text) {
-      throw new Error('Gemini returned an empty response payload.');
-    }
-
-    const parsed = JSON.parse(text);
-    const validated = DailyPlanPayloadSchema.safeParse(parsed);
-    if (!validated.success) {
-      throw new Error(
-        `Gemini output validation failed: ${validated.error.issues[0]?.message ?? 'invalid schema'}`,
-      );
-    }
-
-    return {
-      ...validated.data,
+  return invokeStructuredGemini({
+    prompt,
+    temperature: 0.35,
+    responseSchema: dailyPlanResponseSchema,
+    zodSchema: DailyPlanPayloadSchema,
+    emptyErrorMessage: 'Gemini returned an empty response payload.',
+    validationErrorPrefix: 'Gemini output validation failed',
+    missingKeyMessage: (model) =>
+      `GEMINI_API_KEY is not configured on the server. Showing SAANS personalised rules-based plan (configure GEMINI_API_KEY for ${model}).`,
+    defaultTimeoutMs: 20000,
+    options,
+    onSuccess: (data, model): DailyPlanResponse => ({
+      ...data,
       source: 'gemini',
       model,
       generatedAt: new Date().toISOString(),
-    };
-  } catch (error) {
-    const classified = classifyGeminiError(error, model);
-    return generateFallbackDailyPlan(
-      profile,
-      air,
-      classified.userMessage,
-      classified.code,
-    );
-  }
+    }),
+    onFallback: (reason, code) =>
+      generateFallbackDailyPlan(profile, air, reason, code),
+  });
 }
 
 export async function askSaansAssistant(
@@ -541,18 +563,6 @@ export async function askSaansAssistant(
   air: AirQualityData,
   options: GeminiCallOptions = {},
 ): Promise<AskSaansResponse> {
-  const model = getConfiguredModel();
-  const ai: GeminiContentClient | null = options.client ?? getAiClient();
-  if (!ai) {
-    return generateFallbackAskResponse(
-      question,
-      profile,
-      air,
-      `GEMINI_API_KEY is not configured on the server. Showing SAANS contextual rules-based answer (configure GEMINI_API_KEY for ${model}).`,
-      'missing_key',
-    );
-  }
-
   const context = buildCompactContext(profile, air);
   const recentHistory = history.slice(-6);
 
@@ -569,56 +579,24 @@ ${JSON.stringify(context, null, 2)}
 
 Keep the answer crisp (2-4 short paragraphs or bullet points), cite the exact supplied readings used in "dataPointsUsed", and suggest 3 concise relevant follow-up questions in "followUpSuggestions".`;
 
-  try {
-    const response = await executeGeminiWithRetry(
-      () =>
-        ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction: SYSTEM_GUARDRAILS,
-            temperature: 0.4,
-            responseMimeType: 'application/json',
-            responseSchema: askResponseSchema,
-          },
-        }),
-      model,
-      {
-        maxRetries: 2,
-        baseDelayMs: 500,
-        maxDelayMs: 2000,
-        attemptTimeoutMs: 18000,
-        ...options.retryOptions,
-      },
-    );
-
-    const text = response.text;
-    if (!text) {
-      throw new Error('Gemini returned an empty answer.');
-    }
-
-    const parsed = JSON.parse(text);
-    const validated = AskSaansPayloadSchema.safeParse(parsed);
-    if (!validated.success) {
-      throw new Error(
-        `Gemini ask response validation failed: ${validated.error.issues[0]?.message ?? 'invalid schema'}`,
-      );
-    }
-
-    return {
-      ...validated.data,
+  return invokeStructuredGemini({
+    prompt,
+    temperature: 0.4,
+    responseSchema: askResponseSchema,
+    zodSchema: AskSaansPayloadSchema,
+    emptyErrorMessage: 'Gemini returned an empty answer.',
+    validationErrorPrefix: 'Gemini ask response validation failed',
+    missingKeyMessage: (model) =>
+      `GEMINI_API_KEY is not configured on the server. Showing SAANS contextual rules-based answer (configure GEMINI_API_KEY for ${model}).`,
+    defaultTimeoutMs: 18000,
+    options,
+    onSuccess: (data, model): AskSaansResponse => ({
+      ...data,
       source: 'gemini',
       model,
       generatedAt: new Date().toISOString(),
-    };
-  } catch (error) {
-    const classified = classifyGeminiError(error, model);
-    return generateFallbackAskResponse(
-      question,
-      profile,
-      air,
-      classified.userMessage,
-      classified.code,
-    );
-  }
+    }),
+    onFallback: (reason, code) =>
+      generateFallbackAskResponse(question, profile, air, reason, code),
+  });
 }

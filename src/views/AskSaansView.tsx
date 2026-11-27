@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Loader2,
   MessageSquareText,
@@ -32,13 +32,25 @@ export function AskSaansView() {
 
   const [input, setInput] = useState('');
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleSubmit = async (questionText?: string) => {
     const q = (questionText ?? input).trim();
     if (!q || chatLoading) return;
     setInput('');
     await sendChatMessage(q);
-    setTimeout(() => {
+    if (scrollTimerRef.current) {
+      clearTimeout(scrollTimerRef.current);
+    }
+    scrollTimerRef.current = setTimeout(() => {
       if (transcriptRef.current) {
         transcriptRef.current.scrollTo({
           top: transcriptRef.current.scrollHeight,

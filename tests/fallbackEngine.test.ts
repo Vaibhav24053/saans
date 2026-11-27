@@ -211,3 +211,43 @@ describe('fallback Ask SAANS question categories', () => {
     }
   });
 });
+
+describe('fallback engine US AQI severity boundary alignment (100/101, 150/151, 200/201)', () => {
+  it('aligns fallback plan severity strictly with US EPA AQI breakpoints', () => {
+    const profile = makeProfile({
+      commuteType: 'car',
+      hasAirPurifier: false,
+      children: 1,
+    });
+
+    const planFor = (aqi: number) =>
+      generateFallbackDailyPlan(
+        profile,
+        makeAirData({
+          current: {
+            usAqi: aqi,
+            europeanAqi: 50,
+            pm25: 50,
+            pm10: 80,
+            no2: 20,
+            so2: 10,
+            o3: 30,
+          },
+        }),
+        'Boundary test',
+        'missing_key',
+      );
+
+    // 100 (Moderate) vs 101 (Elevated / Sensitive Groups)
+    assert.match(planFor(100).headline, /^Moderate modelled air/i);
+    assert.match(planFor(101).headline, /^Sensitive Groups air/i);
+
+    // 150 (Sensitive Groups) vs 151 (Unhealthy)
+    assert.match(planFor(150).headline, /^Sensitive Groups air/i);
+    assert.match(planFor(151).headline, /^Unhealthy modelled air/i);
+
+    // 200 (Unhealthy) vs 201 (Very Unhealthy / Severe)
+    assert.match(planFor(200).headline, /^Unhealthy modelled air/i);
+    assert.match(planFor(201).headline, /^Heavy .* smog day/i);
+  });
+});

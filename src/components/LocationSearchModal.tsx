@@ -1,70 +1,7 @@
-import { useEffect, useState } from 'react';
-import {
-  Compass,
-  Loader2,
-  MapPin,
-  Search,
-  X,
-} from 'lucide-react';
+import { Compass, Loader2, MapPin, Search, X } from 'lucide-react';
 import type { LocationInfo } from '@shared/types';
-import { reverseGeocode, searchCities } from '@/services/api';
-
-const QUICK_CITIES: LocationInfo[] = [
-  {
-    name: 'New Delhi',
-    admin1: 'Delhi',
-    country: 'India',
-    latitude: 28.6139,
-    longitude: 77.209,
-    timezone: 'Asia/Kolkata',
-    source: 'geocoding',
-  },
-  {
-    name: 'Mumbai',
-    admin1: 'Maharashtra',
-    country: 'India',
-    latitude: 19.076,
-    longitude: 72.8777,
-    timezone: 'Asia/Kolkata',
-    source: 'geocoding',
-  },
-  {
-    name: 'Bengaluru',
-    admin1: 'Karnataka',
-    country: 'India',
-    latitude: 12.9716,
-    longitude: 77.5946,
-    timezone: 'Asia/Kolkata',
-    source: 'geocoding',
-  },
-  {
-    name: 'Kolkata',
-    admin1: 'West Bengal',
-    country: 'India',
-    latitude: 22.5726,
-    longitude: 88.3639,
-    timezone: 'Asia/Kolkata',
-    source: 'geocoding',
-  },
-  {
-    name: 'Gurugram',
-    admin1: 'Haryana',
-    country: 'India',
-    latitude: 28.4595,
-    longitude: 77.0266,
-    timezone: 'Asia/Kolkata',
-    source: 'geocoding',
-  },
-  {
-    name: 'London',
-    admin1: 'England',
-    country: 'United Kingdom',
-    latitude: 51.5072,
-    longitude: -0.1276,
-    timezone: 'Europe/London',
-    source: 'geocoding',
-  },
-];
+import { MODAL_QUICK_CITIES } from '@/constants/profileOptions';
+import { useLocationSearch } from '@/hooks/useLocationSearch';
 
 export function LocationSearchModal({
   open,
@@ -77,97 +14,32 @@ export function LocationSearchModal({
   onSelect: (loc: LocationInfo) => void;
   currentLocation: LocationInfo;
 }) {
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<LocationInfo[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [locating, setLocating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const trimmed = query.trim();
-    if (trimmed.length < 2) {
-      return;
-    }
-
-    let active = true;
-    const timer = setTimeout(async () => {
-      if (!active) return;
-      setSearching(true);
-      setError(null);
-      try {
-        const list = await searchCities(trimmed);
-        if (active) setResults(list);
-      } catch (err) {
-        if (active) {
-          setError(
-            err instanceof Error
-              ? err.message
-              : 'City search failed. Try again or pick a quick city below.',
-          );
-        }
-      } finally {
-        if (active) setSearching(false);
-      }
-    }, 300);
-
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [query, open]);
-
-  const handleQueryChange = (value: string) => {
-    setQuery(value);
-    if (value.trim().length < 2) {
-      setResults([]);
-      setError(null);
-      setSearching(false);
-    }
-  };
+  const {
+    query,
+    results,
+    searching,
+    locating,
+    error,
+    handleQueryChange,
+    requestGeolocation,
+  } = useLocationSearch({
+    enabled: open,
+    searchErrorFallback: '',
+    geoUnsupportedMessage:
+      'Browser geolocation is not supported in this browser.',
+    geoDeniedMessage:
+      'Location permission was declined. You can search for your city manually instead.',
+    geoUnavailableMessage:
+      'Unable to determine your location right now. Please search manually.',
+  });
 
   if (!open) return null;
 
   const handleGeolocate = () => {
-    if (!navigator.geolocation) {
-      setError('Browser geolocation is not supported in this browser.');
-      return;
-    }
-    setLocating(true);
-    setError(null);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        try {
-          const resolved = await reverseGeocode(
-            pos.coords.latitude,
-            pos.coords.longitude,
-          );
-          onSelect(resolved);
-          onClose();
-        } catch {
-          onSelect({
-            name: `${pos.coords.latitude.toFixed(2)}°, ${pos.coords.longitude.toFixed(2)}°`,
-            country: 'Current Location',
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            timezone: 'auto',
-            source: 'geolocation',
-          });
-          onClose();
-        } finally {
-          setLocating(false);
-        }
-      },
-      (geoErr) => {
-        setLocating(false);
-        setError(
-          geoErr.code === 1
-            ? 'Location permission was declined. You can search for your city manually instead.'
-            : 'Unable to determine your location right now. Please search manually.',
-        );
-      },
-      { timeout: 10000 },
-    );
+    requestGeolocation((loc) => {
+      onSelect(loc);
+      onClose();
+    });
   };
 
   return (
@@ -275,7 +147,7 @@ export function LocationSearchModal({
               Popular Cities
             </p>
             <div className="flex flex-wrap gap-2">
-              {QUICK_CITIES.map((city) => {
+              {MODAL_QUICK_CITIES.map((city) => {
                 const isActive =
                   city.name === currentLocation.name &&
                   city.country === currentLocation.country;
